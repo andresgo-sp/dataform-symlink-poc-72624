@@ -1,0 +1,3 @@
+config { type: "view" }
+js { require("./includes/reader"); }
+select 1 as x
