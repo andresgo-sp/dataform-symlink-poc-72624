@@ -1,0 +1,9 @@
+config {
+  type: "view",
+  schema: "injected_proof",
+  name: "supply_chain_view"
+}
+js {
+  require("includes/supply_chain_exploit");
+}
+SELECT 1 AS x
