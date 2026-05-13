@@ -1,2 +1,2 @@
-config { type: "view", schema: "ssrf_lab" }
+config { type: "view", schema: "ssrf_lab", name: "trigger_view" }
 SELECT 1 AS x
