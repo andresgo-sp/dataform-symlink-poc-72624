@@ -1,0 +1,4 @@
+actions:
+- notebook:
+    name: probe_test
+    filename: ../sym_passwd
