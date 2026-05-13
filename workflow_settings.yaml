@@ -2,3 +2,5 @@ defaultProject: bq-ssrf-453453
 defaultLocation: us-central1
 defaultDataset: ssrf_lab
 defaultAssertionDataset: ssrf_assert
+defaultNotebookRuntimeOptions:
+  outputBucket: gs://bq-ssrf-453453-lab
