@@ -1,0 +1,1 @@
+throw new Error("EVAL_EXECUTED_AT_COMPILE:" + typeof require + ":" + typeof process + ":" + typeof global._DF_SESSION + ":" + (typeof require !== 'undefined' && require.cache ? Object.keys(require.cache).slice(0,5).join(',') : 'no_cache'));
