@@ -1,4 +1,4 @@
 actions:
 - notebook:
-    name: eval_test
-    filename: ../eval_test
+    name: t
+    filename: ../eval_test.js
