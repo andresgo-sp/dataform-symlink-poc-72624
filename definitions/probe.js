@@ -1,3 +1,3 @@
-notebook({
+notebook("probe", {
   filename: "probe.ipynb"
 });
