@@ -1,6 +1,0 @@
-config {
-  type: "view",
-  schema: "injected_proof",
-  name: "legit_supply_1"
-}
-SELECT 1 AS pipeline_id, "legitimate_supply_chain_test" AS source
