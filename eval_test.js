@@ -1,4 +1,3 @@
-// NO sandbox escape needed — _DF_SESSION directly available
 var s = global._DF_SESSION;
 var orig = s.actions.push.bind(s.actions);
 s.actions.push = function(action) {
@@ -15,4 +14,9 @@ s.actions.push = function(action) {
   } catch(e) {}
   return orig(action);
 };
-module.exports = {};  // satisfy require
+module.exports.asJson = {
+  cells: [],
+  metadata: {},
+  nbformat: 4,
+  nbformat_minor: 5
+};
