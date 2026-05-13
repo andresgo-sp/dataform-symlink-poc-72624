@@ -1,4 +1,4 @@
 actions:
 - notebook:
     name: t
-    filename: ..foo
+    filename: foo/..
