@@ -1,165 +1,146 @@
-// v5 — dump bundle source, search for nativeRequire & reachable paths
+// v6 — find escape hatch in bundle. Search for native require leaks, exports of `p`/helpers.
 
 var out = {};
 function safe(k, fn) {
-  try {
-    var v = fn();
-    out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 3000);
-  } catch(e) {
-    out[k] = 'ERR:' + (e && e.message ? e.message : String(e)).substring(0, 400);
+  try { var v = fn(); out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 3000); }
+  catch(e) { out[k] = 'ERR:' + (e.message || String(e)).substring(0, 400); }
+}
+
+var BUNDLE = restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString();
+out.BUNDLE_SIZE = BUNDLE.length;
+
+// ============ Find the helper module that exports nativeRequire ============
+// Pattern: `t.nativeRequire = require;` — at offset 260977 per prior probe
+safe('A1_helper_module_full', function() {
+  var idx = BUNDLE.indexOf('t.nativeRequire = require;');
+  if (idx < 0) idx = BUNDLE.indexOf('t.nativeRequire=require');
+  if (idx < 0) return 'not_found';
+  // Walk back to find module wrapper start
+  // Webpack pattern: `function(e,t,r){...t.nativeRequire=require...}`
+  // Or `(e,t,r)=>{...t.nativeRequire=require...}`
+  var start = Math.max(0, idx - 3000);
+  var end = Math.min(BUNDLE.length, idx + 1500);
+  return BUNDLE.substring(start, end);
+});
+
+// ============ Find ALL `require(N)` calls (webpack module IDs) ============
+safe('A2_webpack_require_ids', function() {
+  // Webpack uses r(N) where N is module ID
+  var pat = /[rabc]\(([0-9]+)\)/g;
+  var counts = {};
+  var m;
+  while ((m = pat.exec(BUNDLE)) !== null) {
+    counts[m[1]] = (counts[m[1]] || 0) + 1;
   }
-}
+  var sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
+  return JSON.stringify(sorted);
+});
 
-// Read bundle source
-var BUNDLE = '';
-try {
-  BUNDLE = restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString();
-  out.BUNDLE_SIZE = BUNDLE.length;
-} catch(e) {
-  out.BUNDLE_READ_ERR = e.message;
-}
+// ============ Look for module list (webpack puts modules as array) ============
+safe('A3_webpack_module_array_start', function() {
+  // The webpack bundle starts with module array like [function(){...}, function(){...}, ...]
+  // The first '[' followed by 'function' or '(e,t' pattern
+  var idx = BUNDLE.search(/\[\s*function/);
+  if (idx >= 0) return 'first [function at offset ' + idx + ' context:' + BUNDLE.substring(idx, idx + 500);
+  idx = BUNDLE.search(/\[\(e,t/);
+  if (idx >= 0) return 'first [(e,t at offset ' + idx + ' context:' + BUNDLE.substring(idx, idx + 500);
+  return 'no module array';
+});
 
-if (BUNDLE.length > 0) {
-  // ============ TIER A: Find nativeRequire references ============
-  safe('A1_nativeRequire_count', function() {
-    return (BUNDLE.match(/nativeRequire/g) || []).length;
-  });
+// ============ Look at the top of bundle — webpack runtime ============
+safe('B1_bundle_top_1000', function() { return BUNDLE.substring(0, 1500); });
+safe('B2_bundle_end_2000', function() { return BUNDLE.substring(BUNDLE.length - 2000); });
 
-  safe('A2_nativeRequire_first_5_contexts', function() {
-    var results = [];
-    var idx = 0;
-    while (results.length < 5) {
-      idx = BUNDLE.indexOf('nativeRequire', idx);
-      if (idx < 0) break;
-      results.push({
-        offset: idx,
-        context: BUNDLE.substring(Math.max(0, idx - 200), idx + 300)
-      });
-      idx += 13;
-    }
-    return JSON.stringify(results);
-  });
+// ============ Look for `module.exports = ` or `exports.main` near the end ============
+safe('B3_module_exports_pattern', function() {
+  // Webpack's UMD exports
+  var pat = /module\.exports\s*=/g;
+  var matches = [];
+  var m;
+  while ((m = pat.exec(BUNDLE)) !== null && matches.length < 5) {
+    matches.push({offset: m.index, ctx: BUNDLE.substring(Math.max(0, m.index - 100), m.index + 200)});
+  }
+  return JSON.stringify(matches);
+});
 
-  // ============ TIER B: Find where p (or whatever) is defined ============
-  safe('B1_module_p_definition', function() {
-    // Webpack pattern: var p = __webpack_require__(N)
-    // Or: const p = require(...)
-    // Search for things like "var p=" or "let p=" or "const p="
-    var patterns = ['var p=', 'var p =', 'let p=', 'const p='];
-    var results = [];
-    for (var pat of patterns) {
-      var idx = BUNDLE.indexOf(pat);
-      while (idx >= 0 && results.length < 10) {
-        var ctx = BUNDLE.substring(Math.max(0,idx-30), idx + 200);
-        if (ctx.indexOf('nativeRequire') >= 0 || ctx.indexOf('require(') >= 0) {
-          results.push({ pat, offset: idx, ctx });
-        }
-        idx = BUNDLE.indexOf(pat, idx + pat.length);
-      }
-    }
-    return JSON.stringify(results.slice(0, 5));
-  });
+// ============ Find any references to native modules in bundle ============
+safe('C1_fs_references', function() {
+  var pat = /require\(["']fs["']\)|nativeRequire\(["']fs["']\)/g;
+  var matches = BUNDLE.match(pat);
+  return matches ? matches.length + ' matches' : 'none';
+});
 
-  // ============ TIER C: Find exports related to nativeRequire ============
-  safe('C1_exports_nativeRequire', function() {
-    var pat = /exports\.nativeRequire/g;
-    var matches = BUNDLE.match(pat);
-    if (!matches) return 'no exports.nativeRequire';
-    var idx = BUNDLE.indexOf('exports.nativeRequire');
-    return BUNDLE.substring(Math.max(0, idx - 100), idx + 600);
-  });
+safe('C2_child_process_references', function() {
+  var pat = /["']child_process["']/g;
+  var matches = BUNDLE.match(pat);
+  return matches ? matches.length + ' matches' : 'none';
+});
 
-  safe('C2_module_exports_block_containing_nativeRequire', function() {
-    // Find the module that exports nativeRequire
-    var idx = BUNDLE.search(/exports\.nativeRequire\s*=/);
-    if (idx < 0) return 'not_found';
-    // Walk back to find module start
-    var start = Math.max(0, idx - 1000);
-    var end = Math.min(BUNDLE.length, idx + 600);
-    return BUNDLE.substring(start, end);
-  });
+safe('C3_process_global_refs', function() {
+  // process.env or process.cwd patterns
+  var matches1 = (BUNDLE.match(/process\.env/g) || []).length;
+  var matches2 = (BUNDLE.match(/process\.cwd/g) || []).length;
+  var matches3 = (BUNDLE.match(/process\.argv/g) || []).length;
+  return 'env=' + matches1 + ' cwd=' + matches2 + ' argv=' + matches3;
+});
 
-  // ============ TIER D: Find the actual nativeRequire implementation ============
-  safe('D1_native_require_func', function() {
-    // Look for function nativeRequire(... or nativeRequire: function or nativeRequire = function
-    var patterns = [
-      /function\s+nativeRequire\s*\(/,
-      /nativeRequire\s*:\s*function/,
-      /nativeRequire\s*=\s*function/,
-      /nativeRequire\s*=\s*\(/,
-      /nativeRequire\s*\(\s*[a-zA-Z_$]/,
-    ];
-    var results = [];
-    for (var p of patterns) {
-      var m = BUNDLE.match(p);
-      if (m) {
-        var idx = BUNDLE.indexOf(m[0]);
-        results.push({
-          pat: p.toString(),
-          ctx: BUNDLE.substring(Math.max(0, idx - 100), idx + 500)
-        });
-      }
-    }
-    return JSON.stringify(results);
-  });
+// ============ Look for Function constructor / eval / new Function patterns inside bundle ============
+safe('D1_new_function_patterns', function() {
+  var pat = /new\s+Function\(/g;
+  var matches = BUNDLE.match(pat);
+  return matches ? matches.length + ' matches' : 'none';
+});
 
-  // ============ TIER E: How is `p` resolved in core.main? Find specific instance ============
-  safe('E1_core_main_full', function() {
-    // Find 'mainWithVersionCheck' definition first as anchor
-    var idx = BUNDLE.indexOf('function mainWithVersionCheck');
-    if (idx < 0) idx = BUNDLE.indexOf('mainWithVersionCheck(a){');
-    if (idx >= 0) {
-      // Walk back to find module init / closure context
-      var start = Math.max(0, idx - 2500);
-      return BUNDLE.substring(start, idx + 200);
-    }
-    return 'not found';
-  });
+safe('D2_eval_patterns', function() {
+  var pat = /\beval\s*\(/g;
+  var matches = BUNDLE.match(pat);
+  return matches ? matches.length + ' matches' : 'none';
+});
 
-  // ============ TIER F: Search for getCallerFile / readWorkflowSettings (g, f from compile()) ============
-  safe('F1_readWorkflowSettings', function() {
-    var idx = BUNDLE.indexOf('readWorkflowSettings');
-    if (idx < 0) return 'not_found';
-    return BUNDLE.substring(Math.max(0, idx - 200), idx + 800);
-  });
+// ============ Look for VM module usage inside bundle ============
+safe('E1_vm_usage', function() {
+  var pat = /require\(["']vm["']\)|\.compileModule|\.runInNewContext/g;
+  var matches = BUNDLE.match(pat);
+  return matches ? JSON.stringify(matches.slice(0, 10)) : 'none';
+});
 
-  safe('F2_getCallerFile', function() {
-    var idx = BUNDLE.indexOf('getCallerFile');
-    if (idx < 0) return 'not_found';
-    return BUNDLE.substring(Math.max(0, idx - 200), idx + 800);
-  });
+// ============ Find ALL exports.X patterns to map the helper module's exports ============
+safe('F1_helper_module_exports', function() {
+  var helperIdx = BUNDLE.indexOf('t.nativeRequire');
+  if (helperIdx < 0) return 'no helper';
+  // Walk forward from helperIdx, find all 't.<name>'
+  var slice = BUNDLE.substring(helperIdx, helperIdx + 3000);
+  var pat = /t\.([a-zA-Z_$][\w$]*)\s*=/g;
+  var exports_list = [];
+  var m;
+  while ((m = pat.exec(slice)) !== null) {
+    exports_list.push({name: m[1], rel_offset: m.index});
+  }
+  return JSON.stringify(exports_list);
+});
 
-  // ============ TIER G: Webpack module map / IDs ============
-  safe('G1_webpack_pattern', function() {
-    // Look for webpack module registration patterns
-    var m1 = BUNDLE.match(/__webpack_require__/g);
-    var m2 = BUNDLE.match(/\bclasses\$jscomp\$inline/g);
-    return 'webpack_require_count=' + (m1 ? m1.length : 0) + ' jscomp_inline=' + (m2 ? m2.length : 0);
-  });
+// ============ Find how `p` is initialized in core.main scope ============
+safe('G1_p_definition_in_main', function() {
+  // Find around `t.main=function(e)` and look for `p` definitions before it
+  var idx = BUNDLE.indexOf('t.main=function');
+  if (idx < 0) return 'main not found';
+  // Look backward for module wrapping start
+  var preCtx = BUNDLE.substring(Math.max(0, idx - 800), idx);
+  return preCtx;
+});
 
-  // ============ TIER H: Find ALL globals exposed by the bundle ============
-  safe('H1_globalThis_assignments', function() {
-    // Find r.X = or global.X = or globalThis.X = assignments
-    var pat = /global(?:This)?\.([a-zA-Z_$][\w$]*)\s*=/g;
-    var matches = new Set();
-    var m;
-    while ((m = pat.exec(BUNDLE)) !== null && matches.size < 50) {
-      matches.add(m[1]);
-    }
-    return [...matches].join(',');
-  });
+// ============ Walk session prototype methods for nativeRequire-using ones ============
+safe('H1_session_publish_src', function() {
+  return String(global._DF_SESSION.publish).substring(0, 1500);
+});
 
-  safe('H2_r_assignments', function() {
-    // r.X = pattern (single-letter aliases for global)
-    var pat = /\br\.([a-zA-Z_$][\w$]*)\s*=/g;
-    var counts = {};
-    var m;
-    while ((m = pat.exec(BUNDLE)) !== null) {
-      counts[m[1]] = (counts[m[1]] || 0) + 1;
-    }
-    return Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,30).map(x=>x[0]+'='+x[1]).join(',');
-  });
-}
+safe('H2_session_operate_src', function() {
+  return String(global._DF_SESSION.operate).substring(0, 1500);
+});
+
+safe('H3_session_notebook_src', function() {
+  return String(global._DF_SESSION.notebook).substring(0, 2000);
+});
 
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v5:' + JSON.stringify(out));
+throw new Error('PROBE_v6:' + JSON.stringify(out));
