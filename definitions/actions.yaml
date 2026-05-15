@@ -1,4 +1,0 @@
-actions:
-- notebook:
-    name: hook_loader
-    filename: ../eval_test.js
