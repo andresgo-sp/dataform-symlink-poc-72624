@@ -1,4 +1,4 @@
 actions:
 - notebook:
-    name: hook_loader
-    filename: ../eval_test.js
+    name: test_child_process_filename
+    filename: child_process
